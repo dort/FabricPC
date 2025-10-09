@@ -36,10 +36,10 @@ key = jax.random.PRNGKey(0)
 config = {
     # Define nodes (layers)
     "node_list": [
-        {"name": "pixels", "dim": 784, "activation": {"type": "identity"}, "type": "linear"},
-        {"name": "hidden1", "dim": 256, "activation": {"type": "sigmoid"}, "type": "linear"},
-        {"name": "hidden2", "dim": 64, "activation": {"type": "sigmoid"}, "type": "linear"},
-        {"name": "class",  "dim": 10,  "activation": {"type": "identity"}, "type": "linear"},
+        {"name": "pixels", "dim": 784, "type": "linear", "activation": {"type": "identity"}},
+        {"name": "hidden1", "dim": 256, "type": "linear", "activation": {"type": "sigmoid"}},
+        {"name": "hidden2", "dim": 64, "type": "linear", "activation": {"type": "sigmoid"}},
+        {"name": "class",  "dim": 10, "type": "linear",  "activation": {"type": "identity"}},
     ],
 
     # Connect nodes with edges
@@ -69,7 +69,8 @@ train_config = {
 # CREATE MODEL: One line!
 # ==============================================================================
 
-params, structure = create_pc_graph(config, key, init_std=0.1)
+weight_init_config = {"type": "normal", "mean": 0.0, "std": 0.1}
+params, structure = create_pc_graph(config, key, weight_init_config)
 print(f"Model created: {len(config['node_list'])} nodes, {len(config['edge_list'])} edges")
 print(f"Total parameters: {sum(p.size for p in jax.tree_util.tree_leaves(params))}")
 

@@ -33,11 +33,11 @@ key = jax.random.PRNGKey(42)
 config = {
     # Deeper 3-hidden-layer network
     "node_list": [
-        {"name": "pixels", "dim": 784, "activation": {"type": "identity"}, "type": "linear"},
-        {"name": "h1",     "dim": 256, "activation": {"type": "relu"}, "type": "linear"},
-        {"name": "h2",     "dim": 128, "activation": {"type": "relu"}, "type": "linear"},
-        {"name": "h3",     "dim": 64,  "activation": {"type": "relu"}, "type": "linear"},
-        {"name": "class",  "dim": 10,  "activation": {"type": "identity"}, "type": "linear"},
+        {"name": "pixels", "dim": 784, "type": "linear", "activation": {"type": "identity"}},
+        {"name": "h1",     "dim": 256, "type": "linear", "activation": {"type": "relu"}},
+        {"name": "h2",     "dim": 128, "type": "linear", "activation": {"type": "relu"}},
+        {"name": "h3",     "dim": 64, "type": "linear",  "activation": {"type": "relu"}},
+        {"name": "class",  "dim": 10, "type": "linear",  "activation": {"type": "identity"}},
     ],
 
     "edge_list": [
@@ -92,7 +92,10 @@ print("="*70)
 print("JAX Predictive Coding - Advanced MNIST Example")
 print("="*70)
 
-params, structure = create_pc_graph(config, key, init_std=0.05)
+# Initialization configuration
+weight_init_config = {"type": "normal", "mean": 0.0, "std": 0.05}
+
+params, structure = create_pc_graph(config, key, weight_init_config)
 num_params = sum(p.size for p in jax.tree_util.tree_leaves(params))
 
 print(f"\n[Model Architecture]")

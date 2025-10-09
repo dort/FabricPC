@@ -5,7 +5,7 @@ This module provides functions to build graph structures, initialize parameters,
 and create complete PC models from configuration dictionaries.
 """
 
-from typing import Dict, Tuple, List
+from typing import Dict, Tuple, List, Any
 import jax
 import jax.numpy as jnp
 
@@ -16,6 +16,13 @@ from fabricpc_jax.core.types import (
     GraphState,
     GraphStructure,
 )
+from fabricpc_jax.core.initialization import (
+    initialize_weights,
+    initialize_state_values,
+    parse_state_init_config,
+    get_default_weight_init,
+    get_default_state_init,
+)
 
 
 def build_graph_structure(config: dict) -> GraphStructure:
@@ -25,8 +32,8 @@ def build_graph_structure(config: dict) -> GraphStructure:
     Expected config format (matches PyTorch API):
     {
         "node_list": [
-            {"name": "x", "dim": 784, "activation": {"type": "identity"}, "type": "linear"},
-            {"name": "h", "dim": 256, "activation": {"type": "relu"}, "type": "linear"},
+            {"name": "x", "dim": 784, "type": "linear", "activation": {"type": "identity"}},
+            {"name": "h", "dim": 256, "type": "linear", "activation": {"type": "relu"}},
             ...
         ],
         "edge_list": [
@@ -93,8 +100,8 @@ def build_graph_structure(config: dict) -> GraphStructure:
         activation = node_config["activation"]
 
         # Validate node type (optional but recommended)
-        node_type = node_config.get("type", "linear")
-        if node_type.lower() != "linear":
+        node_type = node_config.get("type", "")
+        if node_type.lower() not in ["linear"]:
             raise ValueError(
                 f"Node '{name}' has unsupported type '{node_type}'. "
                 f"Currently only 'linear' node type is supported."
@@ -127,14 +134,26 @@ def build_graph_structure(config: dict) -> GraphStructure:
         nodes=nodes, edges=edges, task_map=task_map, node_order=node_order
     )
 
+def change_node_order(structure: GraphStructure, node_order: Tuple[str, ...]):
+    """
+    Override the topological order of nodes for feedforward initialization. Can be useful for cyclic graphs.
+    Fallback initialization will be applied first to any nodes absent from the node_order tuple.
+    Must recompile the model after calling this function.
+    """
+    # Structure is immutable, create a new one
+    return GraphStructure(
+        nodes=structure.nodes,
+        edges=structure.edges,
+        task_map=structure.task_map,
+        node_order=node_order
+    )
 
 def topological_sort(
     nodes: Dict[str, NodeInfo], edges: Dict[str, EdgeInfo]
 ) -> Tuple[str, ...]:
     """
-    Compute topological ordering of nodes (sources to sinks).
-
-    Args:
+    Compute topological ordering of nodes for feedforward initialization
+        Args:
         nodes: Dictionary of node information
         edges: Dictionary of edge information
 
@@ -164,7 +183,9 @@ def topological_sort(
                 queue.append(target_name)
 
     if len(result) != len(nodes):
-        raise ValueError("Graph contains cycles, cannot create topological order")
+        raise Warning("Graph contains cycles, some nodes will be randomly initialized")
+    else:
+        print("Graph is a DAG, all nodes will be initialized in topological order")
 
     return tuple(result)
 
@@ -172,7 +193,7 @@ def topological_sort(
 def initialize_params(
     structure: GraphStructure,
     key: jax.random.PRNGKey,
-    init_std: float = 0.1,
+    weight_init_config: Dict[str, Any] = None,
 ) -> GraphParams:
     """
     Initialize model parameters (weights and biases).
@@ -180,13 +201,21 @@ def initialize_params(
     Args:
         structure: Graph structure
         key: JAX random key
-        init_std: Standard deviation for weight initialization
+        weight_init_config: Weight initialization configuration dict
+            Examples:
+            - {"type": "normal", "mean": 0, "std": 0.05}
+            - {"type": "uniform", "min": -0.1, "max": 0.1}
+            - {"type": "zeros"}
 
     Returns:
         Initialized GraphParams
     """
     weights = {}
     biases = {}
+
+    # Use default if not provided
+    if weight_init_config is None:
+        weight_init_config = get_default_weight_init()
 
     # Split key for each parameter
     num_params = len(structure.edges) + len(structure.nodes)
@@ -209,8 +238,8 @@ def initialize_params(
         # All incoming edges to a node share the same weight matrix
         if edge_key == target_node.in_edges[0]:
             # Only initialize once for the first incoming edge
-            W = init_std * jax.random.normal(
-                keys[key_idx], (total_in_dim, target_node.dim)
+            W = initialize_weights(
+                weight_init_config, keys[key_idx], (total_in_dim, target_node.dim)
             )
             key_idx += 1
         else:
@@ -233,7 +262,7 @@ def initialize_state(
     structure: GraphStructure,
     batch_size: int,
     clamps: Dict[str, jnp.ndarray] = None,
-    init_method: str = "feedforward",
+    state_init_config: Dict[str, Any] = None,
     params: GraphParams = None,
 ) -> GraphState:
     """
@@ -243,7 +272,11 @@ def initialize_state(
         structure: Graph structure
         batch_size: Batch size
         clamps: Optional dictionary of clamped values
-        init_method: Initialization method ("zeros", "random", "feedforward")
+        state_init_config: State initialization configuration dict
+            Examples:
+            - {"type": "zeros"}
+            - {"type": "normal", "mean": 0, "std": 0.01}
+            - {"type": "feedforward", "fallback": {"type": "normal", "std": 0.01}}
         params: Parameters (required for feedforward init)
 
     Returns:
@@ -257,6 +290,13 @@ def initialize_state(
 
     clamps = clamps or {}
 
+    # Use default if not provided
+    if state_init_config is None:
+        state_init_config = get_default_state_init()
+
+    # Parse initialization config
+    init_method, fallback_config = parse_state_init_config(state_init_config)
+
     # Initialize all nodes
     for node_name, node_info in structure.nodes.items():
         shape = (batch_size, node_info.dim)
@@ -267,12 +307,18 @@ def initialize_state(
             z_latent[node_name] = clamps[node_name]
         elif init_method == "zeros":
             z_latent[node_name] = jnp.zeros(shape)
-        elif init_method == "random":
+        elif init_method == "uniform":
+            # Direct uniform initialization
             key = jax.random.PRNGKey(hash(node_name) % (2**32))
-            z_latent[node_name] = 0.05 * jax.random.normal(key, shape)
+            z_latent[node_name] = initialize_state_values(fallback_config, key, shape)
+        elif init_method == "normal":
+            # Direct normal initialization
+            key = jax.random.PRNGKey(hash(node_name) % (2**32))
+            z_latent[node_name] = initialize_state_values(fallback_config, key, shape)
         elif init_method == "feedforward":
-            # Will be filled in feedforward pass below
-            z_latent[node_name] = jnp.zeros(shape)
+            # Initialize with fallback first, will be overwritten in feedforward pass
+            key = jax.random.PRNGKey(hash(node_name) % (2**32))
+            z_latent[node_name] = initialize_state_values(fallback_config, key, shape)
         else:
             raise ValueError(f"Unknown init_method: {init_method}")
 
@@ -307,7 +353,9 @@ def initialize_state(
 
 
 def create_pc_graph(
-    config: dict, key: jax.random.PRNGKey, init_std: float = 0.1
+    config: dict,
+    key: jax.random.PRNGKey,
+    weight_init_config: Dict[str, Any] = None
 ) -> Tuple[GraphParams, GraphStructure]:
     """
     Create a complete PC graph from configuration.
@@ -317,7 +365,11 @@ def create_pc_graph(
     Args:
         config: Configuration dictionary with node_list, edge_list, task_map
         key: JAX random key for initialization
-        init_std: Standard deviation for weight initialization
+        weight_init_config: Weight initialization configuration dict
+            Examples:
+            - {"type": "normal", "mean": 0, "std": 0.05}
+            - {"type": "uniform", "min": -0.1, "max": 0.1}
+            - None (uses default: normal with std=0.05)
 
     Returns:
         Tuple of (params, structure)
@@ -325,9 +377,9 @@ def create_pc_graph(
     Example:
         >>> config = {
         ...     "node_list": [
-        ...         {"name": "pixels", "dim": 784, "activation": {"type": "identity"}, "type": "linear"},
-        ...         {"name": "hidden", "dim": 256, "activation": {"type": "sigmoid"}, "type": "linear"},
-        ...         {"name": "class", "dim": 10, "activation": {"type": "identity"}, "type": "linear"},
+        ...         {"name": "pixels", "dim": 784, "type": "linear", "activation": {"type": "identity"}},
+        ...         {"name": "hidden", "dim": 256, "type": "linear", "activation": {"type": "sigmoid"}},
+        ...         {"name": "class", "dim": 10, "type": "linear", "activation": {"type": "sigmoid"}},
         ...     ],
         ...     "edge_list": [
         ...         {"source_name": "pixels", "target_name": "hidden", "slot": "in"},
@@ -338,5 +390,5 @@ def create_pc_graph(
         >>> params, structure = create_pc_graph(config, jax.random.PRNGKey(0))
     """
     structure = build_graph_structure(config)
-    params = initialize_params(structure, key, init_std)
+    params = initialize_params(structure, key, weight_init_config)
     return params, structure

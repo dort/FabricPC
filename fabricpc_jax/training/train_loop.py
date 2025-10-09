@@ -11,6 +11,7 @@ import optax
 from fabricpc_jax.core.types import GraphParams, GraphState, GraphStructure
 from fabricpc_jax.core.inference import run_inference
 from fabricpc_jax.models.graph_net import initialize_state
+from fabricpc_jax.core.initialization import get_default_state_init
 
 
 def train_step(
@@ -21,6 +22,7 @@ def train_step(
     optimizer: optax.GradientTransformation,
     T_infer: int,
     eta_infer: float = 0.1,
+    state_init_config: Dict[str, Any] = None,
 ) -> Tuple[GraphParams, optax.OptState, float, GraphState]:
     """
     Single training step: inference + weight update.
@@ -35,6 +37,7 @@ def train_step(
         optimizer: Optax optimizer
         T_infer: Number of inference steps
         eta_infer: Inference learning rate
+        state_init_config: State initialization config (uses default if None)
 
     Returns:
         Tuple of (updated_params, updated_opt_state, loss, final_state)
@@ -56,8 +59,10 @@ def train_step(
                 clamps[node_name] = task_value
 
         # Initialize state
+        # Use provided config or default
+        init_config = state_init_config if state_init_config is not None else get_default_state_init()
         state = initialize_state(
-            structure, batch_size, clamps=clamps, init_method="feedforward", params=params
+            structure, batch_size, clamps=clamps, state_init_config=init_config, params=params
         )
 
         # Run inference to convergence
@@ -106,6 +111,7 @@ def train_pcn(
             - num_epochs: Number of training epochs
             - T_infer: number of inference steps
             - eta_infer: inference learning rate
+            - state_initialization: (optional) state init config (uses default if not provided)
         verbose: Whether to print progress
 
     Returns:
@@ -116,7 +122,8 @@ def train_pcn(
         >>> train_config = {
         ...     "optimizer": {"type": "adam", "lr": 1e-3},
         ...     "T_infer": 20,
-        ...     "eta_infer": 0.1
+        ...     "eta_infer": 0.1,
+        ...     "state_initialization": {"type": "feedforward", "fallback": {"type": "normal", "std": 0.01}}
         ... }
         >>> trained_params = train_pcn(params, structure, train_loader, train_config)
     """
@@ -129,11 +136,12 @@ def train_pcn(
     # Training hyperparameters
     T_infer = config.get("T_infer", 20)
     eta_infer = config.get("eta_infer", 0.1)
+    state_init_config = config.get("state_initialization", None)
 
     # Create JIT-compiled training step
     # We compile it once per training run to avoid recompilation
     jit_train_step = jax.jit(
-        lambda p, o, b: train_step(p, o, b, structure, optimizer, T_infer, eta_infer)
+        lambda p, o, b: train_step(p, o, b, structure, optimizer, T_infer, eta_infer, state_init_config)
     )
 
     # Training loop
@@ -182,13 +190,17 @@ def evaluate_pcn(
         params: Trained parameters
         structure: Graph structure
         test_loader: Test data loader
-        config: Evaluation configuration with T_infer, eta_infer
+        config: Evaluation configuration with keys:
+            - T_infer: number of inference steps
+            - eta_infer: inference learning rate
+            - state_initialization: (optional) state init config (uses default if not provided)
 
     Returns:
         Dictionary of evaluation metrics (e.g., accuracy, loss)
     """
     T_infer = config.get("T_infer", 20)
     eta_infer = config.get("eta_infer", 0.1)
+    state_init_config = config.get("state_initialization", None)
 
     total_loss = 0.0
     total_correct = 0
@@ -214,8 +226,10 @@ def evaluate_pcn(
                     clamps[node_name] = task_value
 
         # Initialize and run inference
+        # Use provided config or default
+        init_config = state_init_config if state_init_config is not None else get_default_state_init()
         state = initialize_state(
-            structure, batch_size, clamps=clamps, init_method="feedforward", params=params
+            structure, batch_size, clamps=clamps, state_init_config=init_config, params=params
         )
         final_state = run_inference(params, state, clamps, structure, T_infer, eta_infer)
 
