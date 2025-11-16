@@ -12,8 +12,8 @@ import optax
 from functools import partial
 
 from fabricpc_jax.core.types import GraphParams, GraphState, GraphStructure
-from fabricpc_jax.core.inference import run_inference
-from fabricpc_jax.models.graph_net import initialize_state
+from fabricpc_jax.core.inference_v2 import run_inference
+from fabricpc_jax.models.graph_net_v2 import initialize_state
 from fabricpc_jax.core.initialization import get_default_state_init
 
 
@@ -95,7 +95,7 @@ def train_step_pmap(
     batch: Dict[str, jnp.ndarray],
     structure: GraphStructure,
     optimizer: optax.GradientTransformation,
-    T_infer: int,
+    infer_steps: int,
     eta_infer: float = 0.1,
     state_init_config: Dict[str, Any] = None,
 ) -> Tuple[GraphParams, optax.OptState, jnp.ndarray, GraphState]:
@@ -111,7 +111,7 @@ def train_step_pmap(
         batch: Sharded batch (has device axis)
         structure: Graph structure
         optimizer: Optax optimizer
-        T_infer: Number of inference steps
+        infer_steps: Number of inference steps
         eta_infer: Inference learning rate
         state_init_config: State initialization config (uses default if None)
 
@@ -140,7 +140,7 @@ def train_step_pmap(
 
         # Run inference
         final_state = run_inference(
-            params, state, clamps, structure, T_infer, eta_infer
+            params, state, clamps, structure, infer_steps, eta_infer
         )
 
         # Compute energy
@@ -172,7 +172,7 @@ def train_step_pmap(
 def create_pmap_train_step(
     structure: GraphStructure,
     optimizer: optax.GradientTransformation,
-    T_infer: int,
+    infer_steps: int,
     eta_infer: float,
     state_init_config: Dict[str, Any] = None,
 ):
@@ -182,7 +182,7 @@ def create_pmap_train_step(
     Args:
         structure: Graph structure (static)
         optimizer: Optimizer (static)
-        T_infer: Number of inference steps (static)
+        infer_steps: Number of inference steps (static)
         eta_infer: Inference learning rate (static)
         state_init_config: State initialization config (static)
 
@@ -192,7 +192,7 @@ def create_pmap_train_step(
 
     def step_fn(params, opt_state, batch):
         return train_step_pmap(
-            params, opt_state, batch, structure, optimizer, T_infer, eta_infer, state_init_config
+            params, opt_state, batch, structure, optimizer, infer_steps, eta_infer, state_init_config
         )
 
     return jax.pmap(step_fn, axis_name="devices")
@@ -244,13 +244,13 @@ def train_pcn_multi_gpu(
     opt_state = replicate_opt_state(opt_state, n_devices)
 
     # Get training hyperparameters
-    T_infer = config.get("T_infer", 20)
+    infer_steps = config.get("infer_steps", 20)
     eta_infer = config.get("eta_infer", 0.1)
     num_epochs = config.get("num_epochs", 10)
     state_init_config = config.get("state_initialization", None)
 
     # Create pmap'ed training step
-    pmap_train_step = create_pmap_train_step(structure, optimizer, T_infer, eta_infer, state_init_config)
+    pmap_train_step = create_pmap_train_step(structure, optimizer, infer_steps, eta_infer, state_init_config)
 
     # Training loop
     for epoch in range(num_epochs):
@@ -324,7 +324,7 @@ def evaluate_pcn_multi_gpu(
     # Replicate params across devices
     params = replicate_params(params, n_devices)
 
-    T_infer = config.get("T_infer", 20)
+    infer_steps = config.get("infer_steps", 20)
     eta_infer = config.get("eta_infer", 0.1)
     state_init_config = config.get("state_initialization", None)
 
@@ -342,7 +342,7 @@ def evaluate_pcn_multi_gpu(
         state = initialize_state(
             structure, batch_size, clamps=clamps, state_init_config=init_config, params=params
         )
-        final_state = run_inference(params, state, clamps, structure, T_infer, eta_infer)
+        final_state = run_inference(params, state, clamps, structure, infer_steps, eta_infer)
         return final_state
 
     pmap_inference = jax.pmap(inference_fn, axis_name="devices")

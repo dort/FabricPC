@@ -79,7 +79,7 @@ class PCNodeBase(GraphElement):
 
         idx_start = sum([node.dim for node in self.in_neighbors.values()])
         idx_end = idx_start + source_node.dim
-        self.weight_map[edge] = [idx_start, idx_end]
+        self.weight_map[edge] = [idx_start, idx_end]  # TODO deprecate
         self.in_neighbors[edge] = source_node
         self.slots[edge.slot].add_connection(edge, source_node)
         self.in_degree += 1

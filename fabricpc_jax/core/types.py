@@ -4,7 +4,7 @@ Core JAX types for predictive coding networks.
 All types are immutable and registered as JAX pytrees for automatic differentiation.
 """
 
-from typing import Dict, Any, Tuple, NamedTuple
+from typing import Dict, Any, Tuple, NamedTuple, Optional
 import jax.numpy as jnp
 from jax import tree_util
 from dataclasses import dataclass
@@ -13,10 +13,10 @@ from dataclasses import dataclass
 @dataclass(frozen=True)
 class SlotInfo:
     """Metadata for an input slot to a node."""
-    name: str
-    parent_node: str
-    is_multi_input: bool
-    in_neighbors: Tuple[str, ...]  # Tuple of source node names
+    name: str  # Slot name (e.g., "in")
+    parent_node: str  # Name of the parent node
+    is_multi_input: bool  # True if slot accepts multiple edges, False for single edge
+    in_neighbors: Tuple[str, ...]  # TODO resolve definition: Tuple of source node names, Tuple of edge keys connecting to this slot
 
 @dataclass(frozen=True)
 class NodeInfo:
@@ -24,9 +24,10 @@ class NodeInfo:
 
     name: str
     dim: int
+    node_type: str  # "linear", "transformer", etc.
     node_config: Dict[str, Any]
     activation_config: Dict[str, Any]  # {"type": "sigmoid", ...}
-    slots: Dict[str, SlotInfo]  # {"in": SlotInSingle, ...}
+    slots: Dict[str, SlotInfo]  # {"in": SlotInfo, ...}
     in_degree: int  # Number of incoming edges
     out_degree: int  # Number of outgoing edges
     in_edges: Tuple[str, ...]  # Tuple of edge keys
@@ -41,26 +42,35 @@ class EdgeInfo:
     target: str
     slot: str
 
+class NodeParams(NamedTuple):
+    """Parameters for a single node (weights, biases, etc.)."""
+    weights: Dict[str, jnp.ndarray]  # Named weight matrices, where name identifies the substructure of the node for the parameters
+    biases: Dict[str, jnp.ndarray]   # Named bias vectors
 
 class GraphParams(NamedTuple):
     """
     Learnable parameters of the predictive coding network.
 
+    Now organized by node rather than edge, supporting complex nodes with
+    multiple internal parameters (e.g., transformer blocks).
+
     Attributes:
-        weights: Dictionary mapping edge keys to weight matrices
-        biases: Dictionary mapping node names to bias vectors
+        nodes: Dictionary mapping node names to their parameters
+            Each node has a dict of weights and a dict of biases
+            Complex nodes may have multiple named weight/bias matrices
     """
 
-    weights: Dict[str, jnp.ndarray]  # {edge_key: weight_matrix}
-    biases: Dict[str, jnp.ndarray]  # {node_name: bias_vector}
+    nodes: Dict[str, NodeParams]  # {node_name: NodeParams}
 
     def __repr__(self) -> str:
-        n_weights = len(self.weights)
-        n_biases = len(self.biases)
-        total_params = sum(w.size for w in self.weights.values()) + sum(
-            b.size for b in self.biases.values()
-        )
-        return f"GraphParams(edges={n_weights}, nodes={n_biases}, total_params={total_params})"
+        n_nodes = len(self.nodes)
+        total_params = 0
+        for node_params in self.nodes.values():
+            if "weights" in node_params._fields:
+                total_params += sum(w.size for w in node_params.weights.values())
+            if "biases" in node_params._fields:
+                total_params += sum(b.size for b in node_params.biases.values())
+        return f"GraphParams(nodes={n_nodes}, total_params={total_params})"
 
 
 class GraphState(NamedTuple):
@@ -75,13 +85,16 @@ class GraphState(NamedTuple):
         error: Prediction errors (z_latent - z_mu)
         pre_activation: Pre-activation values (before activation function)
         gain_mod_error: Gain-modulated errors (error * activation_derivative)
+        latent_grad: Gradients w.r.t. latent states for inference updates
     """
 
     z_latent: Dict[str, jnp.ndarray]
     z_mu: Dict[str, jnp.ndarray]
     error: Dict[str, jnp.ndarray]
+    energy: Dict[str, jnp.ndarray]
     pre_activation: Dict[str, jnp.ndarray]
-    gain_mod_error: Dict[str, jnp.ndarray]
+    gain_mod_error: Dict[str, jnp.ndarray]  # TODO deprecate
+    latent_grad: Dict[str, jnp.ndarray]  # For local gradient accumulation
 
     def __repr__(self) -> str:
         n_nodes = len(self.z_latent)
@@ -116,14 +129,20 @@ class GraphStructure(NamedTuple):
 # Register as pytrees for JAX transformations
 tree_util.register_pytree_node(
     GraphParams,
-    lambda gp: ((gp.weights, gp.biases), None),
+    lambda gp: ((gp.nodes,), None),
     lambda aux, children: GraphParams(*children),
+)
+
+tree_util.register_pytree_node(
+    NodeParams,
+    lambda np: ((np.weights, np.biases), None),
+    lambda aux, children: NodeParams(*children),
 )
 
 tree_util.register_pytree_node(
     GraphState,
     lambda gs: (
-        (gs.z_latent, gs.z_mu, gs.error, gs.pre_activation, gs.gain_mod_error),
+        (gs.z_latent, gs.z_mu, gs.error, gs.energy, gs.pre_activation, gs.gain_mod_error, gs.latent_grad),
         None,
     ),
     lambda aux, children: GraphState(*children),

@@ -50,7 +50,7 @@ config = {
 
 train_config = {
     "num_epochs": 10,
-    "T_infer": 20,
+    "infer_steps": 20,
     "eta_infer": 0.05,
     "optimizer": {
         "type": "adam",
@@ -151,7 +151,7 @@ print(f"\n[Training Configuration]")
 print(f"  Epochs: {train_config['num_epochs']}")
 print(f"  Optimizer: {train_config['optimizer']['type']}")
 print(f"  Learning rate: {train_config['optimizer']['lr']}")
-print(f"  Inference steps: {train_config['T_infer']}")
+print(f"  Inference steps: {train_config['infer_steps']}")
 
 print(f"\n[Training on {n_devices} device(s)]")
 print("  (First batch will be slow due to pmap compilation)\n")

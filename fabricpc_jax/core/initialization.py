@@ -15,7 +15,9 @@ import jax.numpy as jnp
 # ==============================================================================
 
 def initialize_weights(
-    config: Dict[str, Any], key: jax.random.PRNGKey, shape: Tuple[int, ...]
+    config: Dict[str, Any],
+    key: jax.Array,  # from jax.random.PRNGKey
+    shape: Tuple[int, ...]
 ) -> jnp.ndarray:
     """
     Initialize weight array based on configuration.
@@ -115,7 +117,9 @@ def get_default_weight_init() -> Dict[str, Any]:
 # ==============================================================================
 
 def initialize_state_values(
-    config: Dict[str, Any], key: jax.random.PRNGKey, shape: Tuple[int, ...]
+    config: Dict[str, Any],
+    key: jax.Array,  # from jax.random.PRNGKey
+    shape: Tuple[int, ...]
 ) -> jnp.ndarray:
     """
     Initialize state array based on configuration.

@@ -31,7 +31,7 @@ def test_allocate_respects_batch_and_dims(batch_size, dim_a, dim_b):
             {"source_name": "a", "target_name": "b", "slot": "in"},
         ],
         "task_map": {"x": "a", "y": "b"},
-        "T_infer": 1,
+        "infer_steps": 1,
         "eta_infer": 0.05,
         "optimizer": {"type": "adam", "lr": 1e-3},
     }

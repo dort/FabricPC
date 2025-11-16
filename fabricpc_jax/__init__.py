@@ -19,10 +19,27 @@ Example:
     >>> params = train_pcn(params, structure, train_loader, config)
 """
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
-from fabricpc_jax.core import types, activations, inference
-from fabricpc_jax.models import graph_net
-from fabricpc_jax.training import train_loop, optimizers
+from fabricpc_jax import core, models, nodes, training
+from fabricpc_jax.core import types, activations, inference_v2, initialization
+from fabricpc_jax.models import graph_net_v2
+from fabricpc_jax.nodes import base, linear
+from fabricpc_jax.training import train_v2, optimizers, multi_gpu
 
-__all__ = ["types", "activations", "inference", "graph_net", "train_loop", "optimizers"]
+__all__ = [
+    "core",
+    "models",
+    "nodes",
+    "training",
+    "types",
+    "activations",
+    "inference_v2",
+    "initialization",
+    "graph_net_v2",
+    "base",
+    "linear",
+    "train_v2",
+    "optimizers",
+    "multi_gpu",
+]

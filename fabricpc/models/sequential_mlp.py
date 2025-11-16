@@ -15,7 +15,7 @@ class PC_MLP(PCNet, nn.Module):
       - device: torch.device or str, optional (default: 'cuda' if available else 'cpu')
       - task_map: dict, required
       - Optional hyperparameters/flags (if present will be set on the instance):
-          T_infer, eta_infer, eta_learn, latent_init_feedforward, etc.
+          infer_steps, eta_infer, eta_learn, latent_init_feedforward, etc.
     """
 
     def __init__(self, config: dict):
@@ -49,7 +49,7 @@ class PC_MLP(PCNet, nn.Module):
         # Properties
         self.L = len(dims_list)  # number of state layers including input and output
         # Hyperparameters defaults
-        self.T_infer = 20
+        self.infer_steps = 20
         self.eta_infer = 0.1
         self.eta_learn = 1e-4
         # Process configuration
@@ -242,7 +242,7 @@ class PC_MLP(PCNet, nn.Module):
         self, clamps_dict, energy_record: list = None, selection_list: list = None
     ):
         self.clamp_dict = clamps_dict
-        for t in range(self.T_infer):
+        for t in range(self.infer_steps):
             self.update_projections()  # Get projected states (z_mu)
             self.update_error()  # Measure error
             self.get_total_energy(energy_record, selection_list)

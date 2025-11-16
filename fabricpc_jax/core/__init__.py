@@ -1,27 +1,92 @@
 """Core JAX predictive coding components."""
 
-from fabricpc_jax.core.types import GraphParams, GraphState, GraphStructure, NodeInfo, EdgeInfo
-from fabricpc_jax.core.activations import get_activation, sigmoid, relu, tanh, identity
-from fabricpc_jax.core.inference import (
-    compute_projection,
-    compute_latent_gradients,
+# Type definitions
+from fabricpc_jax.core.types import (
+    GraphParams,
+    GraphState,
+    GraphStructure,
+    NodeInfo,
+    EdgeInfo,
+    SlotInfo,
+)
+
+# Activation functions
+from fabricpc_jax.core.activations import (
+    get_activation,
+    get_activation_fn,
+    get_activation_deriv,
+    sigmoid,
+    sigmoid_deriv,
+    relu,
+    relu_deriv,
+    tanh,
+    tanh_deriv,
+    identity,
+    identity_deriv,
+    leaky_relu,
+    leaky_relu_deriv,
+    hard_tanh,
+    hard_tanh_deriv,
+    ACTIVATIONS,
+)
+
+# Inference functions
+from fabricpc_jax.core.inference_v2 import (
+    compute_node_projection,
+    compute_latent_gradients_local,
+    compute_all_projections,
+    compute_errors,
     inference_step,
+    inference_step_parallel,
     run_inference,
 )
 
+# Initialization utilities
+from fabricpc_jax.core.initialization import (
+    initialize_weights,
+    initialize_state_values,
+    parse_state_init_config,
+    get_default_weight_init,
+    get_default_state_init,
+)
+
 __all__ = [
+    # Types
     "GraphParams",
     "GraphState",
     "GraphStructure",
     "NodeInfo",
     "EdgeInfo",
+    "SlotInfo",
+    # Activation functions
     "get_activation",
+    "get_activation_fn",
+    "get_activation_deriv",
     "sigmoid",
+    "sigmoid_deriv",
     "relu",
+    "relu_deriv",
     "tanh",
+    "tanh_deriv",
     "identity",
-    "compute_projection",
-    "compute_latent_gradients",
+    "identity_deriv",
+    "leaky_relu",
+    "leaky_relu_deriv",
+    "hard_tanh",
+    "hard_tanh_deriv",
+    "ACTIVATIONS",
+    # Inference
+    "compute_node_projection",
+    "compute_latent_gradients_local",
+    "compute_all_projections",
+    "compute_errors",
     "inference_step",
+    "inference_step_parallel",
     "run_inference",
+    # Initialization
+    "initialize_weights",
+    "initialize_state_values",
+    "parse_state_init_config",
+    "get_default_weight_init",
+    "get_default_state_init",
 ]

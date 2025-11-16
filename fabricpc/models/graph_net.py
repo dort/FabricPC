@@ -14,7 +14,7 @@ class PCGraphNet(PCNet):
       - task_map: dict, required
       - device: torch.device or str, optional (default: 'cuda' if available else 'cpu')
       - Optional hyperparameters/flags (if present will be set on the instance):
-          T_infer, eta_infer, eta_learn, etc.
+          infer_steps, eta_infer, eta_learn, etc.
     """
 
     def __init__(self, config: dict):
@@ -38,7 +38,7 @@ class PCGraphNet(PCNet):
         # State variables
         self.node_dictionary = {}  # {name: PCNodeBase object}
         # Hyperparameters defaults
-        self.T_infer = 20
+        self.infer_steps = 20
         self.eta_infer = 0.1
         self.eta_learn = 1e-3
         self.latent_init_feedforward = True  # Initialize latent state from the projected state if True, else random init
@@ -268,7 +268,7 @@ class PCGraphNet(PCNet):
         self, clamps_dict, energy_record: list = None, selection_list: list = None
     ):
         self.clamp_dict = clamps_dict
-        for t in range(self.T_infer):
+        for t in range(self.infer_steps):
             self.update_projections()  # Get projected states (z_mu)
             self.update_error()  # Measure error
             self.get_total_energy(energy_record, selection_list)

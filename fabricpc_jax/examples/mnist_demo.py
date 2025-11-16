@@ -26,7 +26,10 @@ from fabricpc_jax.training import train_pcn, evaluate_pcn
 
 # Set random seed for reproducibility
 jax.config.update('jax_default_prng_impl', 'rbg')
-key = jax.random.PRNGKey(0)
+master_rng_key = jax.random.PRNGKey(0)
+
+# Split keys for different stages
+graph_key, train_key, eval_key = jax.random.split(master_rng_key, 3)
 
 # ==============================================================================
 # NETWORK DEFINITION: A dictionary!
@@ -36,17 +39,17 @@ key = jax.random.PRNGKey(0)
 config = {
     # Define nodes (layers)
     "node_list": [
-        {"name": "pixels", "dim": 784, "type": "linear", "activation": {"type": "identity"}},
+        {"name": "pixels",  "dim": 784, "type": "linear", "activation": {"type": "identity"}},
         {"name": "hidden1", "dim": 256, "type": "linear", "activation": {"type": "sigmoid"}},
-        {"name": "hidden2", "dim": 64, "type": "linear", "activation": {"type": "sigmoid"}},
-        {"name": "class",  "dim": 10, "type": "linear",  "activation": {"type": "identity"}},
+        {"name": "hidden2", "dim": 64,  "type": "linear", "activation": {"type": "sigmoid"}},
+        {"name": "class",   "dim": 10,  "type": "linear", "activation": {"type": "sigmoid"}},
     ],
 
     # Connect nodes with edges
     "edge_list": [
-        {"source_name": "pixels", "target_name": "hidden1", "slot": "in"},
+        {"source_name": "pixels",  "target_name": "hidden1", "slot": "in"},
         {"source_name": "hidden1", "target_name": "hidden2", "slot": "in"},
-        {"source_name": "hidden2", "target_name": "class",  "slot": "in"},
+        {"source_name": "hidden2", "target_name": "class",   "slot": "in"},
     ],
 
     # Map tasks to nodes
@@ -55,22 +58,19 @@ config = {
 
 # Training hyperparameters
 train_config = {
-    "num_epochs": 20,      # Number of training epochs
-    "T_infer": 20,        # Inference steps
-    "eta_infer": 0.05,    # Inference learning rate
-    "optimizer": {
-        "type": "adam",
-        "lr": 0.001
-    },
+    "num_epochs": 10,       # Number of training epochs
+    "infer_steps": 20,      # Inference steps
+    "eta_infer": 0.05,      # Inference learning rate
+    "optimizer": {"type": "adam", "lr": 0.001, "weight_decay": 0.001},
 }
+batch_size=200
 
 # fmt: on
 # ==============================================================================
 # CREATE MODEL: One line!
 # ==============================================================================
+params, structure = create_pc_graph(config, graph_key)
 
-weight_init_config = {"type": "normal", "mean": 0.0, "std": 0.1}
-params, structure = create_pc_graph(config, key, weight_init_config)
 print(f"Model created: {len(config['node_list'])} nodes, {len(config['edge_list'])} edges")
 print(f"Total parameters: {sum(p.size for p in jax.tree_util.tree_leaves(params))}")
 
@@ -91,8 +91,8 @@ transform = transforms.Compose([
 train_data = datasets.MNIST('./data', train=True, download=True, transform=transform)
 test_data = datasets.MNIST('./data', train=False, download=True, transform=transform)
 
-train_loader = DataLoader(train_data, batch_size=200, shuffle=True, num_workers=16)
-test_loader = DataLoader(test_data, batch_size=200, shuffle=False, num_workers=16)
+train_loader = DataLoader(train_data, batch_size=batch_size, shuffle=True, num_workers=16)
+test_loader = DataLoader(test_data, batch_size=batch_size, shuffle=False, num_workers=16)
 
 # Wrap loaders to provide one-hot labels
 class OneHotWrapper:
@@ -121,6 +121,7 @@ trained_params = train_pcn(
     structure=structure,
     train_loader=train_loader,
     config=train_config,
+    rng_key=train_key,
     verbose=True,
 )
 delta_t = time.time() - start_time
@@ -131,7 +132,7 @@ print(f"Avg Training time: {delta_t / train_config["num_epochs"]:.2f} seconds pe
 # ==============================================================================
 
 print("\nEvaluating...")
-metrics = evaluate_pcn(trained_params, structure, test_loader, train_config)
+metrics = evaluate_pcn(trained_params, structure, test_loader, train_config, eval_key)
 print(f"Test Accuracy: {metrics['accuracy'] * 100:.2f}%")
 print(f"Test Loss: {metrics['loss']:.4f}")
 

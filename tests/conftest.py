@@ -33,7 +33,7 @@ def small_graph_config():
             {"source_name": "a", "target_name": "b", "slot": "in"},
         ],
         "task_map": {"x": "a", "y": "b"},
-        "T_infer": 2,
+        "infer_steps": 2,
         "eta_infer": 0.05,
         "optimizer": {"type": "adam", "lr": 1e-3},
     }

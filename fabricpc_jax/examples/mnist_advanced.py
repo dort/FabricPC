@@ -18,12 +18,12 @@ from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
 import time
 
-from fabricpc_jax.models import create_pc_graph, initialize_state
+from fabricpc_jax.models import create_pc_graph
 from fabricpc_jax.training import train_step, create_optimizer, evaluate_pcn
-from fabricpc_jax.core.inference import run_inference
 
-# Set random seed
-key = jax.random.PRNGKey(42)
+# Set random seed and split for different stages
+master_rng_key = jax.random.PRNGKey(42)
+graph_key, train_key, eval_key = jax.random.split(master_rng_key, 3)
 
 # ==============================================================================
 # ADVANCED NETWORK CONFIGURATION
@@ -34,10 +34,10 @@ config = {
     # Deeper 3-hidden-layer network
     "node_list": [
         {"name": "pixels", "dim": 784, "type": "linear", "activation": {"type": "identity"}},
-        {"name": "h1",     "dim": 256, "type": "linear", "activation": {"type": "relu"}},
-        {"name": "h2",     "dim": 128, "type": "linear", "activation": {"type": "relu"}},
-        {"name": "h3",     "dim": 64, "type": "linear",  "activation": {"type": "relu"}},
-        {"name": "class",  "dim": 10, "type": "linear",  "activation": {"type": "identity"}},
+        {"name": "h1",     "dim": 256, "type": "linear", "activation": {"type": "sigmoid"}},
+        {"name": "h2",     "dim": 128, "type": "linear", "activation": {"type": "sigmoid"}},
+        {"name": "h3",     "dim": 64, "type": "linear",  "activation": {"type": "sigmoid"}},
+        {"name": "class",  "dim": 10, "type": "linear",  "activation": {"type": "sigmoid"}},
     ],
 
     "edge_list": [
@@ -52,14 +52,12 @@ config = {
 
 # More sophisticated training configuration
 train_config = {
-    "T_infer": 30,         # More inference steps for deeper network
+    "infer_steps": 20,     # More inference steps for deeper network
     "eta_infer": 0.05,     # Inference learning rate
-    "optimizer": {
-        "type": "adamw",   # AdamW with weight decay
-        "lr": 0.001,
-        "weight_decay": 1e-4,
-    },
+    "optimizer": {"type": "adam", "lr": 0.001, "weight_decay": 0.001},
 }
+batch_size = 200
+num_epochs = 10
 
 # fmt: on
 # ==============================================================================
@@ -92,10 +90,7 @@ print("="*70)
 print("JAX Predictive Coding - Advanced MNIST Example")
 print("="*70)
 
-# Initialization configuration
-weight_init_config = {"type": "normal", "mean": 0.0, "std": 0.05}
-
-params, structure = create_pc_graph(config, key, weight_init_config)
+params, structure = create_pc_graph(config, graph_key)
 num_params = sum(p.size for p in jax.tree_util.tree_leaves(params))
 
 print(f"\n[Model Architecture]")
@@ -115,13 +110,12 @@ print(f"\n[Data Loading]")
 
 transform = transforms.Compose([
     transforms.ToTensor(),
-    transforms.Lambda(lambda x: x.view(-1)),
+    transforms.Lambda(lambda x_dat: x_dat.view(-1)),
 ])
 
 train_data = datasets.MNIST('./data', train=True, download=True, transform=transform)
 test_data = datasets.MNIST('./data', train=False, download=True, transform=transform)
 
-batch_size = 128
 train_loader = OneHotWrapper(DataLoader(
     train_data, batch_size=batch_size, shuffle=True, num_workers=2
 ))
@@ -142,11 +136,10 @@ print(f"\n[Training Configuration]")
 print(f"  Optimizer: {train_config['optimizer']['type']}")
 print(f"  Learning rate: {train_config['optimizer']['lr']}")
 print(f"  Weight decay: {train_config['optimizer']['weight_decay']}")
-print(f"  Inference steps: {train_config['T_infer']}")
+print(f"  Inference steps: {train_config['infer_steps']}")
 print(f"  Inference eta: {train_config['eta_infer']}")
 
-num_epochs = 10
-T_infer = train_config['T_infer']
+infer_steps = train_config['infer_steps']
 eta_infer = train_config['eta_infer']
 
 # Create optimizer
@@ -156,7 +149,7 @@ opt_state = optimizer.init(params)
 # JIT compile training step
 print(f"\n[Compiling JIT functions...]")
 jit_train_step = jax.jit(
-    lambda p, o, b: train_step(p, o, b, structure, optimizer, T_infer, eta_infer)
+    lambda p, o, b, k: train_step(p, o, b, structure, optimizer, k, infer_steps, eta_infer)
 )
 
 # Training loop with detailed monitoring
@@ -166,6 +159,14 @@ print("  (First batch will be slow due to JIT compilation)\n")
 best_accuracy = 0.0
 training_history = []
 
+# Prepare keys for all epochs and batches
+num_batches = len(train_loader)
+all_rng_keys = []
+for epoch in range(num_epochs):
+    epoch_rng_key, train_key = jax.random.split(train_key)
+    batch_keys = jax.random.split(epoch_rng_key, num_batches)
+    all_rng_keys.append(batch_keys)
+
 for epoch in range(num_epochs):
     epoch_start = time.time()
     epoch_losses = []
@@ -173,8 +174,8 @@ for epoch in range(num_epochs):
     for batch_idx, (x, y) in enumerate(train_loader):
         batch = {"x": jnp.array(x), "y": y}
 
-        # Training step
-        params, opt_state, loss, _ = jit_train_step(params, opt_state, batch)
+        # Training step with unique rng_key
+        params, opt_state, loss, _ = jit_train_step(params, opt_state, batch, all_rng_keys[epoch][batch_idx])
         epoch_losses.append(float(loss))
 
         # Progress indicator every 100 batches
@@ -185,8 +186,9 @@ for epoch in range(num_epochs):
     epoch_time = time.time() - epoch_start
     avg_loss = sum(epoch_losses) / len(epoch_losses)
 
-    # Evaluate on test set
-    metrics = evaluate_pcn(params, structure, test_loader, train_config)
+    # Evaluate on test set with unique eval key for this epoch
+    epoch_eval_key, eval_key = jax.random.split(eval_key)
+    metrics = evaluate_pcn(params, structure, test_loader, train_config, epoch_eval_key)
     accuracy = metrics['accuracy'] * 100
 
     # Track best model
