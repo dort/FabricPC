@@ -353,7 +353,7 @@ def initialize_state(
     node_key_map = dict(zip(node_names, node_keys))
     node_state_dict = {}
 
-    # Initialize all nodes
+    # Initialize all nodes, respecting clamps
     for node_name, node_info in structure.nodes.items():
         shape = (batch_size, node_info.dim)
 
@@ -421,6 +421,25 @@ def initialize_state(
     # Compute the initial energy
     state = compute_errors(state, structure)
 
+    return state
+
+def set_latents_to_clamps(
+    state: GraphState,
+    clamps: Dict[str, jnp.ndarray],
+) -> GraphState:
+    """
+    Set the latent states of specified nodes to their clamped values.
+
+    Args:
+        state: Current graph state
+        clamps: Dictionary of clamped values, keyed on node names
+
+    Returns:
+        Updated GraphState with latents set to clamped values
+    """
+    for node_name, clamp_value in clamps.items():
+        if node_name in state.nodes:
+            state = update_node_in_state(state, node_name, z_latent=clamp_value)
     return state
 
 def create_pc_graph(

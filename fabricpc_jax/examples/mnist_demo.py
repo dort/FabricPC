@@ -20,10 +20,14 @@ import jax.numpy as jnp
 from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
 import time
+import os
 
 from fabricpc_jax.models import create_pc_graph
 from fabricpc_jax.training import train_pcn, evaluate_pcn
 from fabricpc_jax.training.data_utils import OneHotWrapper
+from fabricpc_jax.examples.plotting.visualize_experiment import plot_energy_history_interactive
+
+os.environ["JAX_PLATFORMS"] = "cuda"  # change to "cpu", "cuda" or "tpu" if available
 
 # Set random seed for reproducibility
 jax.config.update('jax_default_prng_impl', 'threefry2x32')  # 'rbg' is faster than 'threefry2x32', but less reproducible across vmap
@@ -79,6 +83,7 @@ params, structure = create_pc_graph(config, graph_key)
 
 print(f"Model created: {len(config['node_list'])} nodes, {len(config['edge_list'])} edges")
 print(f"Total parameters: {sum(p.size for p in jax.tree_util.tree_leaves(params))}")
+print("os.fork warning is harmless - due to PyTorch data loaders.")
 
 # ==============================================================================
 # LOAD DATA
@@ -105,7 +110,7 @@ test_loader = OneHotWrapper(test_loader)
 
 print("\nTraining (JIT compilation on first batch)...")
 start_time = time.time()
-trained_params = train_pcn(
+trained_params, energy_history, _ = train_pcn(
     params=params,
     structure=structure,
     train_loader=train_loader,

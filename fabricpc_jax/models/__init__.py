@@ -9,6 +9,7 @@ from fabricpc_jax.models.graph_net import (
     initialize_params,
     initialize_state,
     create_pc_graph,
+    set_latents_to_clamps,
 )
 
 __all__ = [
@@ -18,4 +19,5 @@ __all__ = [
     "initialize_params",
     "initialize_state",
     "create_pc_graph",
+    "set_latents_to_clamps",
 ]

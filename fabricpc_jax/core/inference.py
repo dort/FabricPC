@@ -183,10 +183,8 @@ def compute_errors(
         node_info = structure.nodes[node_name]
         node_state = state.nodes[node_name]
 
-        # Compute basic error
+        # Compute basic error  # TODO cal the node's compute error method
         error = node_state.z_latent - node_state.z_mu
-        energy = jnp.sum(error ** 2)  # TODO call the node energy functional method
-
         # Compute gain-modulated error
         if node_info.in_degree == 0:
             # Source nodes have no prediction
@@ -195,6 +193,9 @@ def compute_errors(
             _, deriv_fn = get_activation(node_info.activation_config)
             gain = deriv_fn(node_state.pre_activation)
             gain_mod_error = error * gain
+
+        # Compute energy
+        energy = jnp.sum(error ** 2)  # TODO call the node's energy functional method
 
         # Update the state with new errors
         state = update_node_in_state(state, node_name, error=error, gain_mod_error=gain_mod_error, energy=energy)

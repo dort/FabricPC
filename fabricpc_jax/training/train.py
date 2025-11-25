@@ -5,7 +5,7 @@ This module implements training with local gradient computation for each node,
 as required for true predictive coding with local learning rules.
 """
 
-from typing import Dict, Tuple, Any, cast
+from typing import Dict, Tuple, Any, cast, List
 import jax
 import jax.numpy as jnp
 import optax
@@ -109,23 +109,20 @@ def train_step(
             clamps[node_name] = task_value
 
     # Initialize state
-    state = initialize_state(
+    init_state = initialize_state(
         structure, batch_size, rng_key, clamps=clamps, params=params
     )
 
     # Run inference to convergence
     final_state = run_inference(
-        params, state, clamps, structure, infer_steps, eta_infer
+        params, init_state, clamps, structure, infer_steps, eta_infer
     )
 
     # Compute energy (sum of squared errors)
-    energy = 0.0
-    for node_name, node_info in structure.nodes.items():
-        if node_info.in_degree > 0:  # Skip source nodes
-            energy += final_state.nodes[node_name].energy
+    energy = sum([final_state.nodes[node_name].energy for node_name in structure.nodes if
+                  structure.nodes[node_name].in_degree > 0])
 
-    # Average over batch
-    loss = energy / batch_size
+    loss = energy
 
     # Compute LOCAL gradients for each node
     grads = compute_local_weight_gradients(params, final_state, structure)
@@ -144,7 +141,9 @@ def train_pcn(
     config: dict,
     rng_key: jax.Array,
     verbose: bool = True,
-) -> GraphParams:
+    epoch_callback = None,
+    iter_callback = None,
+) -> Tuple[GraphParams, List[Any], List[Any]]:
     """
     Main training loop for predictive coding network with local learning.
 
@@ -159,9 +158,15 @@ def train_pcn(
             - eta_infer: inference learning rate
         rng_key: JAX random key (will be split for each batch)
         verbose: Whether to print progress
+        epoch_callback: Optional function called at end of each epoch:
+            (epoch_idx, params, structure, config, rng_key) -> any
+        iter_callback: Optional function called at end of each batch:
+            (epoch_idx, batch_idx, loss) -> any
 
     Returns:
         Trained parameters
+        2D List of energy values per iteration (epochs, batches)
+        List of evaluation metrics per epoch
 
     Example:
         >>> rng_key = jax.random.PRNGKey(0)
@@ -194,9 +199,9 @@ def train_pcn(
     )
 
     # Training loop
-    for epoch in range(num_epochs):
-        epoch_losses = []
-
+    iter_results = []
+    epoch_results = []
+    for epoch_idx in range(num_epochs):
         # Estimate number of batches (if possible)
         try:
             num_batches = len(train_loader)
@@ -208,6 +213,7 @@ def train_pcn(
         epoch_rng_key, rng_key = jax.random.split(rng_key)
         batch_keys = jax.random.split(epoch_rng_key, num_batches)
 
+        batch_energies = []
         for batch_idx, batch_data in enumerate(train_loader):
             # Convert batch to JAX format
             if isinstance(batch_data, (list, tuple)):
@@ -225,15 +231,23 @@ def train_pcn(
             # Training step with unique rng_key for this batch
             params, opt_state, loss, _ = jit_train_step(params, opt_state, batch, batch_keys[batch_idx])
 
-            epoch_losses.append(float(loss))
+            if iter_callback is not None:
+                batch_energies.append(iter_callback(epoch_idx, batch_idx, loss))
+            else:
+                batch_energies.append(float(loss) / next(iter(batch.values())).shape[0])  # nornalize by batch size
+
+        iter_results.append(batch_energies)
 
         # Compute average loss for epoch
-        avg_loss = sum(epoch_losses) / len(epoch_losses) if epoch_losses else 0.0
+        avg_loss = sum(batch_energies) / len(batch_energies) if batch_energies else 0.0
+
+        # Epoch callback
+        epoch_results.append(epoch_callback(epoch_idx, params, structure, config, rng_key) if epoch_callback else None)
 
         if verbose:
-            print(f"Epoch {epoch + 1}/{num_epochs}, Loss: {avg_loss:.4f}")
+            print(f"Epoch {epoch_idx + 1}/{num_epochs}, Loss: {avg_loss:.4f}")
 
-    return params
+    return params, iter_results, epoch_results
 
 
 def evaluate_pcn(
@@ -289,11 +303,9 @@ def evaluate_pcn(
 
         # Map batch to clamps (only clamp input during eval)
         clamps = {}
-        for task_name, task_value in batch.items():
-            if task_name in structure.task_map:
-                node_name = structure.task_map[task_name]
-                if task_name == "x":  # Only clamp input
-                    clamps[node_name] = task_value
+        if "x" in structure.task_map:
+            x_node = structure.task_map["x"]
+            clamps[x_node] = batch["x"]
 
         # Initialize and run inference with unique rng_key
         state = initialize_state(
@@ -303,13 +315,26 @@ def evaluate_pcn(
             params, state, clamps, structure, infer_steps, eta_infer
         )
 
+        # Get the label for energy evaluation
+        labels = {}
+        if "y" in structure.task_map:
+            y_node = structure.task_map["y"]
+            labels[y_node] = batch["y"]
+
+        # Compute energy
+        energy = sum([final_state.nodes[node_name].energy for node_name in structure.nodes if
+                      structure.nodes[node_name].in_degree > 0])
+
+        # Add the energy from the label node if applicable
+        for node_name, label in labels.items():
+            node_state = final_state.nodes[node_name]
+            error = node_state.z_latent - label
+            energy += jnp.sum(error ** 2)  # TODO: use node's energy functional
+
+        loss = energy / batch_size
+
         # Compute loss
-        energy = 0.0
-        for node_name, node_info in structure.nodes.items():
-            if node_info.in_degree > 0:
-                energy += final_state.nodes[node_name].energy
-        energy = energy / batch_size
-        total_loss += float(energy) * batch_size
+        total_loss += float(loss) * batch_size
 
         # Compute accuracy (if applicable)
         if "y" in structure.task_map:

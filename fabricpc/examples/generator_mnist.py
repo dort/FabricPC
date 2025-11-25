@@ -23,7 +23,7 @@ from fabricpc.training.PC_trainer import (
     eval_image_energy,
     eval_class_accuracy,
 )
-from evaluation.visualize_experiment import (
+from fabricpc.evaluation.visualize_experiment import (
     plot_train_val_metric,
     plot_energy_history_interactive,
 )
