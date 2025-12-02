@@ -127,6 +127,64 @@ class LinearNode(NodeBase):
         return z_mu, pre_activation, {}
 
     @staticmethod
+    def compute_error(
+        state: NodeState,
+        node_info: NodeInfo
+    ) -> NodeState:
+        """
+        Compute prediction error and gain-modulated error.
+
+        Args:
+            state: NodeState object (contains z_latent, z_mu)
+            node_info: NodeInfo object (contains activation function, etc.)
+
+        Returns:
+            Updated NodeState with error and gain_mod_error computed
+        """
+        if node_info.in_degree == 0:
+            # Source nodes have no prediction error
+            zero_error = jnp.zeros_like(state.z_latent)
+            zero_gain_mod_error = jnp.zeros_like(state.z_latent)
+            state = state._replace(error=zero_error, gain_mod_error=zero_gain_mod_error)
+            return state
+
+        error = state.z_latent - state.z_mu
+
+        # Get activation derivative
+        _, activation_deriv = get_activation(node_info.activation_config)
+        f_prime = activation_deriv(state.pre_activation)  # shape (batch_size, dim_node_latent)
+
+        gain_mod_error = error * f_prime  # element-wise multiplication
+
+        # Update node state
+        state = state._replace(error=error, gain_mod_error=gain_mod_error)
+        return state
+
+    @staticmethod
+    def energy_functional(
+        state: NodeState,
+        node_info: NodeInfo
+    ) -> NodeState:
+        """
+        Compute energy of the node using Gaussian energy functional.
+
+        E = 0.5 * ||z_latent - z_mu||^2
+
+        Args:
+            state: NodeState object (contains z_latent, z_mu)
+            node_info: NodeInfo object (not used here)
+
+        Returns:
+            Updated NodeState with energy computed
+        """
+        error = state.z_latent - state.z_mu
+        energy = 0.5 * jnp.sum(error ** 2, axis=1)  # sum over latent dimensions
+
+        # Update node state
+        state = state._replace(energy=energy)
+        return state
+
+    @staticmethod
     def compute_gradient(
         params: NodeParams,
         inputs: Dict[str, jnp.ndarray],
@@ -228,3 +286,34 @@ class LinearNode(NodeBase):
             bias_grads["b"] = grad_b
 
         return NodeParams(weights=weight_grads, biases=bias_grads)
+
+
+class LinearAutoGradNode(LinearNode):
+    """
+    Linear node that uses NodeBase's autodiff-based gradient computation.
+
+    This class extends LinearNode but delegates compute_gradient to the
+    base class implementation, which uses JAX automatic differentiation
+    via compute_jacobian_for_edge instead of the manual formula.
+
+    Useful for:
+    - Verifying correctness of manual gradient implementations
+    - Prototyping new node types before optimizing gradients
+    - Debugging gradient computation issues
+    """
+
+    @staticmethod
+    def compute_gradient(
+        params: NodeParams,
+        inputs: Dict[str, jnp.ndarray],
+        node_state: NodeState,
+        node_info: NodeInfo,
+        structure: GraphStructure,
+    ) -> Dict[str, jnp.ndarray]:
+        """
+        Compute gradients using NodeBase's autodiff implementation.
+
+        This delegates to NodeBase.compute_gradient which uses JAX's
+        automatic differentiation to compute Jacobians.
+        """
+        return NodeBase.compute_gradient(params, inputs, node_state, node_info, structure)

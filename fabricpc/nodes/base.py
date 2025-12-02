@@ -111,6 +111,40 @@ class NodeBase(ABC):
         pass
 
     @staticmethod
+    @abstractmethod
+    def compute_error(
+        state: NodeState,
+        node_info: NodeInfo
+    ) -> NodeState:
+        """
+        Compute the prediction error for this node.
+
+        Args:
+            state: NodeState object (contains z_latent, z_mu, etc.)
+            node_info: NodeInfo object (may contain energy functional info)
+        Returns:
+            Updated NodeState with computed error
+        """
+        pass
+
+    @staticmethod
+    @abstractmethod
+    def energy_functional(
+        state: NodeState,
+        node_info: NodeInfo
+    ) -> NodeState:
+        """
+        Compute the energy functional for this node.
+
+        Args:
+            state: NodeState object (contains z_latent, z_mu, etc.)
+            node_info: NodeInfo object (may contain energy functional info)
+        Returns:
+            Updated NodeState with computed energy
+        """
+        pass
+
+    @staticmethod
     def compute_jacobian_for_edge(
         edge_key: str,
         params: NodeParams,

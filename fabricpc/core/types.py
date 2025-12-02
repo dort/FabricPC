@@ -23,7 +23,7 @@ class NodeInfo:
     """Metadata for a single node in the graph."""
 
     name: str
-    dim: int
+    dim: int  # output dimension of the node  # TODO make List[int] representing shape, excludes the batch dimension. Batch is always first dimension in arrays and given by GraphState.
     node_type: str  # "linear", "transformer", etc.
     node_config: Dict[str, Any]
     activation_config: Dict[str, Any]  # {"type": "sigmoid", ...}

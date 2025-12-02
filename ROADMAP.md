@@ -1,0 +1,1752 @@
+# FabricPC Development Roadmap
+
+**A JAX-native Predictive Coding Neural Network Framework**
+
+This roadmap outlines the development plan to transform FabricPC into a production-ready, developer-friendly library for industrial-scale research and development of predictive coding neural networks.
+
+---
+
+## Executive Summary
+
+FabricPC is built on solid foundations:
+- Pure functional architecture compatible with JAX transformations
+- Clean separation of concerns (core, nodes, graph, training)
+- Extensible node-based design with slot connectivity
+- Multi-GPU support via pmap
+- Local Hebbian learning with Jacobian-based gradient computation
+
+This roadmap addresses:
+1. **New Node Types** - Transformer, Conv, Normalization layers
+2. **Advanced Solvers** - iPC, dynamic inference scheduling
+3. **N-Dimensional Tensor Support** - Beyond 2D matrices
+4. **Plugin Architecture** - Custom nodes without library modification
+5. **Hypergraph Support** - Hierarchical subgraph containers
+6. **Documentation & Demos** - Compelling examples for community adoption
+
+---
+
+## Phase 1: Foundation Strengthening
+
+### 1.1 N-Dimensional Tensor Support
+
+**Current State**: NodeState assumes 2D tensors `(batch, dim)`.
+
+**Requirements**:
+- [ ] Extend `NodeState` to support arbitrary shapes `(batch, *spatial_dims, channels)`
+- [ ] Update `NodeInfo` with `shape: Tuple[int, ...]` instead of just `dim: int`
+- [ ] Modify inference loop to handle tensor reshaping correctly
+- [ ] Update error computation for n-dimensional predictions
+- [ ] Ensure Jacobian computation works with higher-rank tensors
+
+**Implementation**:
+```python
+# types.py changes
+@dataclass(frozen=True)
+class NodeInfo:
+    name: str
+    shape: Tuple[int, ...]  # (height, width, channels) or (seq_len, embed_dim)
+    node_type: str
+    # ... rest unchanged
+
+    @property
+    def dim(self) -> int:
+        """Backward-compatible flat dimension."""
+        return int(jnp.prod(jnp.array(self.shape)))
+```
+
+**Files to Modify**:
+- `fabricpc/core/types.py` - NodeInfo shape field
+- `fabricpc/core/inference.py` - Handle n-dim tensors
+- `fabricpc/graph/graph_net.py` - Shape validation
+- `fabricpc/nodes/base.py` - Shape-aware interface
+
+---
+
+### 1.2 Plugin Architecture for Custom Nodes
+
+**Goal**: Allow developers to register custom node types without modifying library code.
+
+**Requirements**:
+- [ ] Create node registry with decorator-based registration
+- [ ] Support runtime node type discovery
+- [ ] Validate custom nodes implement required interface
+- [ ] Provide base mixins for common patterns
+
+**Implementation**:
+```python
+# fabricpc/nodes/registry.py
+from typing import Dict, Type
+from fabricpc.nodes.base import NodeBase
+
+_NODE_REGISTRY: Dict[str, Type[NodeBase]] = {}
+
+def register_node(name: str):
+    """Decorator to register custom node types."""
+    def decorator(cls: Type[NodeBase]):
+        if not issubclass(cls, NodeBase):
+            raise TypeError(f"{cls.__name__} must inherit from NodeBase")
+        _NODE_REGISTRY[name] = cls
+        return cls
+    return decorator
+
+def get_node_class(node_type: str) -> Type[NodeBase]:
+    """Get node class by type name."""
+    if node_type not in _NODE_REGISTRY:
+        raise ValueError(f"Unknown node type: {node_type}. "
+                        f"Available: {list(_NODE_REGISTRY.keys())}")
+    return _NODE_REGISTRY[node_type]
+
+# Usage in user code:
+@register_node("my_custom_layer")
+class MyCustomNode(NodeBase):
+    ...
+```
+
+**Files to Create/Modify**:
+- `fabricpc/nodes/registry.py` - New registry system
+- `fabricpc/nodes/__init__.py` - Export registration API
+- `fabricpc/graph/graph_net.py` - Use registry for node instantiation
+
+---
+
+### 1.3 Configurable Energy Functionals
+
+**Current State**: Hard-coded Gaussian energy `E = ½||z - μ||²`.
+
+**Requirements**:
+- [ ] Define energy functional interface
+- [ ] Implement Gaussian (default), Bernoulli, Categorical energies
+- [ ] Per-node energy configuration
+- [ ] Custom energy functional support
+
+**Implementation**:
+```python
+# fabricpc/core/energy.py
+from abc import ABC, abstractmethod
+from typing import Tuple
+import jax.numpy as jnp
+
+class EnergyFunctional(ABC):
+    """Base class for energy functionals."""
+
+    @staticmethod
+    @abstractmethod
+    def energy(z_latent: jnp.ndarray, z_mu: jnp.ndarray) -> jnp.ndarray:
+        """Compute energy E(z, μ)."""
+        pass
+
+    @staticmethod
+    @abstractmethod
+    def error(z_latent: jnp.ndarray, z_mu: jnp.ndarray) -> jnp.ndarray:
+        """Compute ∂E/∂z_latent."""
+        pass
+
+class GaussianEnergy(EnergyFunctional):
+    """Gaussian energy: E = ½||z - μ||²"""
+
+    @staticmethod
+    def energy(z_latent, z_mu):
+        diff = z_latent - z_mu
+        return 0.5 * jnp.sum(diff ** 2, axis=-1)
+
+    @staticmethod
+    def error(z_latent, z_mu):
+        return z_latent - z_mu
+
+class BernoulliEnergy(EnergyFunctional):
+    """Bernoulli energy for binary outputs."""
+
+    @staticmethod
+    def energy(z_latent, z_mu):
+        eps = 1e-7
+        z_mu = jnp.clip(z_mu, eps, 1 - eps)
+        return -jnp.sum(
+            z_latent * jnp.log(z_mu) + (1 - z_latent) * jnp.log(1 - z_mu),
+            axis=-1
+        )
+
+    @staticmethod
+    def error(z_latent, z_mu):
+        eps = 1e-7
+        z_mu = jnp.clip(z_mu, eps, 1 - eps)
+        return (z_mu - z_latent) / (z_mu * (1 - z_mu))
+```
+
+---
+
+## Phase 2: Core Node Types
+
+### 2.1 Normalization Nodes
+
+#### 2.1.1 LayerNorm Node
+
+**Purpose**: Normalize across feature dimension, critical for transformers.
+
+```python
+# fabricpc/nodes/layer_norm.py
+@register_node("layer_norm")
+class LayerNormNode(NodeBase):
+    """
+    Layer Normalization: y = γ * (x - μ) / σ + β
+
+    Normalizes across the last dimension (features).
+    Slots: "in" (single input)
+    Params: gamma (scale), beta (shift)
+    """
+
+    @staticmethod
+    def get_slots():
+        return {"in": SlotSpec(name="in", is_multi_input=False)}
+
+    @staticmethod
+    def initialize_params(key, node_dim, input_dims, config):
+        eps = config.get("eps", 1e-5)
+        return NodeParams(
+            weights={"gamma": jnp.ones((1, node_dim))},
+            biases={"beta": jnp.zeros((1, node_dim))}
+        )
+
+    @staticmethod
+    def forward(params, inputs, node_info, node_out_shape):
+        x = list(inputs.values())[0]
+        eps = node_info.node_config.get("eps", 1e-5)
+
+        mean = jnp.mean(x, axis=-1, keepdims=True)
+        var = jnp.var(x, axis=-1, keepdims=True)
+        x_norm = (x - mean) / jnp.sqrt(var + eps)
+
+        gamma = params.weights["gamma"]
+        beta = params.biases["beta"]
+
+        z_mu = gamma * x_norm + beta
+        pre_activation = z_mu  # No separate activation
+
+        return z_mu, pre_activation, {"mean": mean, "var": var, "x_norm": x_norm}
+```
+
+#### 2.1.2 BatchNorm Node
+
+```python
+# fabricpc/nodes/batch_norm.py
+@register_node("batch_norm")
+class BatchNormNode(NodeBase):
+    """
+    Batch Normalization with running statistics.
+
+    During training: normalize over batch dimension
+    During inference: use running mean/var
+
+    Note: Requires special handling in PC since batch statistics
+    create cross-batch dependencies in Jacobian.
+    """
+
+    @staticmethod
+    def get_slots():
+        return {"in": SlotSpec(name="in", is_multi_input=False)}
+
+    @staticmethod
+    def initialize_params(key, node_dim, input_dims, config):
+        return NodeParams(
+            weights={
+                "gamma": jnp.ones((1, node_dim)),
+                "running_mean": jnp.zeros((1, node_dim)),
+                "running_var": jnp.ones((1, node_dim)),
+            },
+            biases={"beta": jnp.zeros((1, node_dim))}
+        )
+```
+
+### 2.2 Softmax Node
+
+```python
+# fabricpc/nodes/softmax.py
+@register_node("softmax")
+class SoftmaxNode(NodeBase):
+    """
+    Softmax activation node for classification outputs.
+
+    y_i = exp(x_i) / Σ_j exp(x_j)
+
+    For PC networks, provides probabilistic output interpretation.
+    Typically used at output layer with cross-entropy energy.
+    """
+
+    @staticmethod
+    def get_slots():
+        return {"in": SlotSpec(name="in", is_multi_input=True)}
+
+    @staticmethod
+    def forward(params, inputs, node_info, node_out_shape):
+        # Sum all inputs (like LinearNode but without weights)
+        pre_activation = jnp.zeros(node_out_shape)
+        for edge_key, x in inputs.items():
+            if edge_key in params.weights:
+                pre_activation = pre_activation + jnp.matmul(x, params.weights[edge_key])
+            else:
+                pre_activation = pre_activation + x
+
+        if "b" in params.biases:
+            pre_activation = pre_activation + params.biases["b"]
+
+        # Stable softmax
+        x_max = jnp.max(pre_activation, axis=-1, keepdims=True)
+        exp_x = jnp.exp(pre_activation - x_max)
+        z_mu = exp_x / jnp.sum(exp_x, axis=-1, keepdims=True)
+
+        return z_mu, pre_activation, {}
+
+    @staticmethod
+    def compute_jacobian_for_edge(edge_key, params, inputs, node_state, node_info):
+        """
+        Softmax Jacobian: ∂y_i/∂x_j = y_i(δ_ij - y_j)
+        """
+        y = node_state.z_mu  # (batch, dim)
+        batch_size, dim = y.shape
+
+        # Jacobian is (batch, dim, dim)
+        # J[b,i,j] = y[b,i] * (δ_ij - y[b,j])
+        eye = jnp.eye(dim)
+        jacobian = y[..., :, None] * (eye - y[..., None, :])
+
+        # If there are weights, chain rule
+        if edge_key in params.weights:
+            W = params.weights[edge_key]  # (in_dim, out_dim)
+            # J_full = J_softmax @ W.T
+            jacobian = jnp.einsum('boi,io->boi', jacobian, W)
+
+        return jacobian
+```
+
+### 2.3 Convolutional Node
+
+```python
+# fabricpc/nodes/conv.py
+@register_node("conv2d")
+class Conv2DNode(NodeBase):
+    """
+    2D Convolutional node for spatial feature extraction.
+
+    Input shape: (batch, height, width, in_channels)
+    Output shape: (batch, out_height, out_width, out_channels)
+
+    Supports:
+    - Configurable kernel size, stride, padding
+    - Multiple input channels from different sources
+    - Efficient transposed convolution for gradient computation
+    """
+
+    @staticmethod
+    def get_slots():
+        return {"in": SlotSpec(name="in", is_multi_input=True)}
+
+    @staticmethod
+    def initialize_params(key, node_dim, input_dims, config):
+        kernel_size = config.get("kernel_size", (3, 3))
+        in_channels = config.get("in_channels", sum(input_dims.values()))
+        out_channels = config.get("out_channels", node_dim)
+
+        # Xavier initialization for conv kernels
+        fan_in = in_channels * kernel_size[0] * kernel_size[1]
+        fan_out = out_channels * kernel_size[0] * kernel_size[1]
+        std = jnp.sqrt(2.0 / (fan_in + fan_out))
+
+        kernel_shape = (*kernel_size, in_channels, out_channels)
+        kernel = jax.random.normal(key, kernel_shape) * std
+
+        return NodeParams(
+            weights={"kernel": kernel},
+            biases={"b": jnp.zeros((1, 1, 1, out_channels))}
+        )
+
+    @staticmethod
+    def forward(params, inputs, node_info, node_out_shape):
+        config = node_info.node_config
+        stride = config.get("stride", (1, 1))
+        padding = config.get("padding", "SAME")
+
+        # Concatenate inputs along channel dimension
+        x = jnp.concatenate(list(inputs.values()), axis=-1)
+
+        # Convolution
+        kernel = params.weights["kernel"]
+        pre_activation = jax.lax.conv_general_dilated(
+            x, kernel,
+            window_strides=stride,
+            padding=padding,
+            dimension_numbers=('NHWC', 'HWIO', 'NHWC')
+        )
+
+        if "b" in params.biases:
+            pre_activation = pre_activation + params.biases["b"]
+
+        # Apply activation
+        activation_fn, _ = get_activation(node_info.activation_config)
+        z_mu = activation_fn(pre_activation)
+
+        return z_mu, pre_activation, {}
+
+    @staticmethod
+    def compute_gradient(params, inputs, node_state, node_info, structure):
+        """
+        Compute gradients using transposed convolution.
+
+        For conv: y = conv(x, W)
+        Gradient: ∂L/∂x = conv_transpose(∂L/∂y, W)
+        """
+        config = node_info.node_config
+        stride = config.get("stride", (1, 1))
+        padding = config.get("padding", "SAME")
+
+        latent_grads = {node_info.name: node_state.error}
+
+        kernel = params.weights["kernel"]
+        gain_mod_error = node_state.gain_mod_error
+
+        for edge_key, x in inputs.items():
+            source_name = structure.edges[edge_key].source
+
+            # Transposed convolution for gradient
+            grad = jax.lax.conv_transpose(
+                gain_mod_error, kernel,
+                strides=stride,
+                padding=padding,
+                dimension_numbers=('NHWC', 'HWIO', 'NHWC')
+            )
+
+            if source_name not in latent_grads:
+                latent_grads[source_name] = jnp.zeros_like(x)
+            latent_grads[source_name] = latent_grads[source_name] - grad
+
+        return latent_grads
+```
+
+### 2.4 Attention Nodes
+
+#### 2.4.1 Multi-Head Self-Attention
+
+```python
+# fabricpc/nodes/attention.py
+@register_node("mha")
+class MultiHeadAttentionNode(NodeBase):
+    """
+    Multi-Head Self-Attention for transformer architectures.
+
+    Input: (batch, seq_len, embed_dim)
+    Output: (batch, seq_len, embed_dim)
+
+    Implements scaled dot-product attention with multiple heads.
+
+    Slots:
+    - "q": Query input (or uses "in" for self-attention)
+    - "k": Key input (optional, defaults to query)
+    - "v": Value input (optional, defaults to query)
+    - "mask": Optional attention mask
+    """
+
+    @staticmethod
+    def get_slots():
+        return {
+            "in": SlotSpec(name="in", is_multi_input=False),  # Self-attention input
+            "mask": SlotSpec(name="mask", is_multi_input=False),  # Optional mask
+        }
+
+    @staticmethod
+    def initialize_params(key, node_dim, input_dims, config):
+        num_heads = config.get("num_heads", 8)
+        embed_dim = node_dim
+        head_dim = embed_dim // num_heads
+
+        assert embed_dim % num_heads == 0, "embed_dim must be divisible by num_heads"
+
+        keys = jax.random.split(key, 4)
+        std = 1.0 / jnp.sqrt(embed_dim)
+
+        return NodeParams(
+            weights={
+                "W_q": jax.random.normal(keys[0], (embed_dim, embed_dim)) * std,
+                "W_k": jax.random.normal(keys[1], (embed_dim, embed_dim)) * std,
+                "W_v": jax.random.normal(keys[2], (embed_dim, embed_dim)) * std,
+                "W_o": jax.random.normal(keys[3], (embed_dim, embed_dim)) * std,
+            },
+            biases={
+                "b_q": jnp.zeros((1, 1, embed_dim)),
+                "b_k": jnp.zeros((1, 1, embed_dim)),
+                "b_v": jnp.zeros((1, 1, embed_dim)),
+                "b_o": jnp.zeros((1, 1, embed_dim)),
+            }
+        )
+
+    @staticmethod
+    def forward(params, inputs, node_info, node_out_shape):
+        config = node_info.node_config
+        num_heads = config.get("num_heads", 8)
+
+        # Get input (self-attention)
+        x = inputs.get(list(inputs.keys())[0])  # Main input
+        batch_size, seq_len, embed_dim = x.shape
+        head_dim = embed_dim // num_heads
+
+        # Linear projections
+        Q = jnp.matmul(x, params.weights["W_q"]) + params.biases["b_q"]
+        K = jnp.matmul(x, params.weights["W_k"]) + params.biases["b_k"]
+        V = jnp.matmul(x, params.weights["W_v"]) + params.biases["b_v"]
+
+        # Reshape for multi-head: (batch, seq, heads, head_dim)
+        Q = Q.reshape(batch_size, seq_len, num_heads, head_dim).transpose(0, 2, 1, 3)
+        K = K.reshape(batch_size, seq_len, num_heads, head_dim).transpose(0, 2, 1, 3)
+        V = V.reshape(batch_size, seq_len, num_heads, head_dim).transpose(0, 2, 1, 3)
+
+        # Scaled dot-product attention
+        scale = jnp.sqrt(head_dim)
+        scores = jnp.matmul(Q, K.transpose(0, 1, 3, 2)) / scale  # (batch, heads, seq, seq)
+
+        # Optional mask
+        mask_key = [k for k in inputs if ":mask" in k]
+        if mask_key:
+            mask = inputs[mask_key[0]]
+            scores = jnp.where(mask == 0, -1e9, scores)
+
+        attn_weights = jax.nn.softmax(scores, axis=-1)
+        attn_output = jnp.matmul(attn_weights, V)  # (batch, heads, seq, head_dim)
+
+        # Reshape back: (batch, seq, embed_dim)
+        attn_output = attn_output.transpose(0, 2, 1, 3).reshape(batch_size, seq_len, embed_dim)
+
+        # Output projection
+        pre_activation = jnp.matmul(attn_output, params.weights["W_o"]) + params.biases["b_o"]
+
+        # Store attention weights for gradient computation
+        substructure = {
+            "attn_weights": attn_weights,
+            "Q": Q, "K": K, "V": V,
+        }
+
+        # Apply activation (typically identity for attention output)
+        activation_fn, _ = get_activation(node_info.activation_config)
+        z_mu = activation_fn(pre_activation)
+
+        return z_mu, pre_activation, substructure
+```
+
+#### 2.4.2 Transformer Block
+
+```python
+# fabricpc/nodes/transformer.py
+@register_node("transformer_block")
+class TransformerBlockNode(NodeBase):
+    """
+    Complete Transformer Block with attention and FFN.
+
+    Architecture:
+    x → LayerNorm → MHA → + → LayerNorm → FFN → +
+    └─────────────────────┘ └────────────────────┘
+         (residual)              (residual)
+
+    This is a composite node that internally manages its substructure.
+    For hypergraph support, this could be decomposed into a subgraph.
+    """
+
+    @staticmethod
+    def get_slots():
+        return {"in": SlotSpec(name="in", is_multi_input=False)}
+
+    @staticmethod
+    def initialize_params(key, node_dim, input_dims, config):
+        num_heads = config.get("num_heads", 8)
+        ffn_dim = config.get("ffn_dim", node_dim * 4)
+        embed_dim = node_dim
+
+        keys = jax.random.split(key, 8)
+        std = 1.0 / jnp.sqrt(embed_dim)
+
+        return NodeParams(
+            weights={
+                # Attention weights
+                "W_q": jax.random.normal(keys[0], (embed_dim, embed_dim)) * std,
+                "W_k": jax.random.normal(keys[1], (embed_dim, embed_dim)) * std,
+                "W_v": jax.random.normal(keys[2], (embed_dim, embed_dim)) * std,
+                "W_o": jax.random.normal(keys[3], (embed_dim, embed_dim)) * std,
+                # FFN weights
+                "W_ff1": jax.random.normal(keys[4], (embed_dim, ffn_dim)) * std,
+                "W_ff2": jax.random.normal(keys[5], (ffn_dim, embed_dim)) * std,
+                # LayerNorm parameters
+                "ln1_gamma": jnp.ones((1, 1, embed_dim)),
+                "ln2_gamma": jnp.ones((1, 1, embed_dim)),
+            },
+            biases={
+                "b_q": jnp.zeros((1, 1, embed_dim)),
+                "b_k": jnp.zeros((1, 1, embed_dim)),
+                "b_v": jnp.zeros((1, 1, embed_dim)),
+                "b_o": jnp.zeros((1, 1, embed_dim)),
+                "b_ff1": jnp.zeros((1, 1, ffn_dim)),
+                "b_ff2": jnp.zeros((1, 1, embed_dim)),
+                "ln1_beta": jnp.zeros((1, 1, embed_dim)),
+                "ln2_beta": jnp.zeros((1, 1, embed_dim)),
+            }
+        )
+```
+
+---
+
+## Phase 3: Advanced Solvers
+
+### 3.1 Incremental Predictive Coding (iPC)
+
+**Background**: Standard PC updates all latents simultaneously. iPC updates latents incrementally node-by-node, which can improve convergence and stability.
+
+```python
+# fabricpc/solvers/ipc.py
+"""
+Incremental Predictive Coding (iPC) Solver
+
+Unlike standard PC which updates all latents simultaneously,
+iPC updates latents incrementally following topological order.
+This can improve:
+- Convergence speed (especially for deep networks)
+- Stability (avoids oscillations)
+- Memory efficiency (process one node at a time)
+
+Reference: Salvatori et al. "Incremental Predictive Coding" (2022)
+"""
+
+def ipc_inference_step(
+    params: GraphParams,
+    state: GraphState,
+    clamps: Dict[str, jnp.ndarray],
+    structure: GraphStructure,
+    eta_infer: float,
+    update_order: str = "forward"  # "forward", "backward", "random"
+) -> GraphState:
+    """
+    Single iPC inference step with sequential node updates.
+
+    Args:
+        update_order: Order to update nodes
+            - "forward": Input to output (topological)
+            - "backward": Output to input (reverse topological)
+            - "random": Random order each step
+    """
+    if update_order == "forward":
+        order = structure.node_order
+    elif update_order == "backward":
+        order = structure.node_order[::-1]
+    else:
+        order = jax.random.permutation(
+            jax.random.PRNGKey(0),
+            jnp.array(structure.node_order)
+        )
+
+    for node_name in order:
+        if node_name in clamps:
+            continue  # Skip clamped nodes
+
+        # Recompute prediction for this node with current state
+        z_mu, pre_act, substruct = compute_node_projection(
+            params, state, node_name, structure
+        )
+        state = update_node_in_state(state, node_name,
+                                     z_mu=z_mu, pre_activation=pre_act)
+
+        # Compute error
+        state = compute_node_error(state, node_name, structure)
+
+        # Compute gradient only for this node
+        grad = compute_single_node_gradient(state, params, node_name, structure)
+
+        # Update this node's latent
+        node_state = state.nodes[node_name]
+        new_z = node_state.z_latent - eta_infer * grad
+        state = update_node_in_state(state, node_name, z_latent=new_z)
+
+    return state
+
+
+def run_ipc_inference(
+    params: GraphParams,
+    initial_state: GraphState,
+    clamps: Dict[str, jnp.ndarray],
+    structure: GraphStructure,
+    infer_steps: int,
+    eta_infer: float = 0.1,
+    update_order: str = "forward",
+) -> GraphState:
+    """
+    Run iPC inference for multiple steps.
+
+    The inner loop is not easily vectorizable due to sequential
+    dependencies, but can be JIT compiled.
+    """
+    def body_fn(t, state):
+        return ipc_inference_step(
+            params, state, clamps, structure, eta_infer, update_order
+        )
+
+    return jax.lax.fori_loop(0, infer_steps, body_fn, initial_state)
+```
+
+### 3.2 Dynamic Inference Rate Scheduler
+
+**Purpose**: Adapt learning rate per-node based on energy changes during inference.
+
+```python
+# fabricpc/solvers/dynamic_scheduler.py
+"""
+Dynamic Inference Rate Scheduler
+
+Adapts the inference learning rate (eta_infer) per-node based on:
+1. Current energy magnitude
+2. Energy change rate (convergence speed)
+3. Node depth in graph (deeper nodes may need different rates)
+
+This enables:
+- Faster convergence for stable nodes
+- Careful updates for high-energy nodes
+- Automatic tuning without manual hyperparameter search
+"""
+
+from typing import NamedTuple
+import jax.numpy as jnp
+
+class SchedulerState(NamedTuple):
+    """State tracked by the dynamic scheduler."""
+    node_etas: Dict[str, float]  # Per-node learning rates
+    energy_history: Dict[str, jnp.ndarray]  # Rolling energy window
+    step: int
+
+def create_scheduler(
+    structure: GraphStructure,
+    base_eta: float = 0.1,
+    window_size: int = 5,
+    min_eta: float = 0.001,
+    max_eta: float = 1.0,
+) -> SchedulerState:
+    """Initialize scheduler with uniform learning rates."""
+    node_etas = {name: base_eta for name in structure.nodes}
+    energy_history = {
+        name: jnp.zeros(window_size)
+        for name in structure.nodes
+    }
+    return SchedulerState(node_etas, energy_history, 0)
+
+
+def update_scheduler(
+    scheduler: SchedulerState,
+    state: GraphState,
+    config: Dict[str, Any],
+) -> SchedulerState:
+    """
+    Update learning rates based on current energy landscape.
+
+    Strategies:
+    1. "energy_proportional": η ∝ 1/sqrt(energy)
+    2. "gradient_adaptive": η based on gradient magnitude
+    3. "convergence_aware": Increase η if converging, decrease if oscillating
+    """
+    strategy = config.get("strategy", "convergence_aware")
+    base_eta = config.get("base_eta", 0.1)
+    min_eta = config.get("min_eta", 0.001)
+    max_eta = config.get("max_eta", 1.0)
+
+    new_etas = {}
+    new_history = {}
+
+    for node_name, node_state in state.nodes.items():
+        energy = node_state.energy
+        history = scheduler.energy_history[node_name]
+
+        # Update history (rolling window)
+        new_history[node_name] = jnp.roll(history, -1).at[-1].set(energy)
+
+        if strategy == "energy_proportional":
+            # Lower energy = higher learning rate
+            eta = base_eta / jnp.sqrt(energy + 1e-8)
+
+        elif strategy == "gradient_adaptive":
+            # Scale by gradient magnitude
+            grad_norm = jnp.linalg.norm(node_state.latent_grad)
+            eta = base_eta / (grad_norm + 1e-8)
+
+        elif strategy == "convergence_aware":
+            # Check if energy is decreasing (converging)
+            if scheduler.step >= len(history):
+                energy_trend = history[-1] - history[0]
+                if energy_trend < 0:  # Converging
+                    eta = scheduler.node_etas[node_name] * 1.1
+                else:  # Oscillating or diverging
+                    eta = scheduler.node_etas[node_name] * 0.9
+            else:
+                eta = scheduler.node_etas[node_name]
+
+        new_etas[node_name] = jnp.clip(eta, min_eta, max_eta)
+
+    return SchedulerState(new_etas, new_history, scheduler.step + 1)
+
+
+def scheduled_inference_step(
+    params: GraphParams,
+    state: GraphState,
+    clamps: Dict[str, jnp.ndarray],
+    structure: GraphStructure,
+    scheduler: SchedulerState,
+) -> Tuple[GraphState, SchedulerState]:
+    """
+    Inference step with per-node adaptive learning rates.
+    """
+    # Standard forward pass
+    state = compute_all_projections(params, state, structure)
+    state = compute_errors(state, structure)
+    state = compute_latent_gradients(state, params, structure)
+
+    # Update latents with per-node learning rates
+    for node_name in structure.nodes:
+        if node_name in clamps:
+            new_z = clamps[node_name]
+        else:
+            eta = scheduler.node_etas[node_name]
+            node_state = state.nodes[node_name]
+            new_z = node_state.z_latent - eta * node_state.latent_grad
+        state = update_node_in_state(state, node_name, z_latent=new_z)
+
+    # Update scheduler
+    scheduler = update_scheduler(scheduler, state, {})
+
+    return state, scheduler
+```
+
+### 3.3 Solver Interface
+
+```python
+# fabricpc/solvers/base.py
+"""
+Unified solver interface for different inference algorithms.
+"""
+
+from abc import ABC, abstractmethod
+from typing import Dict, Any, Tuple
+from fabricpc.core.types import GraphParams, GraphState, GraphStructure
+
+class Solver(ABC):
+    """Base class for PC inference solvers."""
+
+    @abstractmethod
+    def step(
+        self,
+        params: GraphParams,
+        state: GraphState,
+        clamps: Dict[str, jnp.ndarray],
+        structure: GraphStructure,
+    ) -> GraphState:
+        """Single inference step."""
+        pass
+
+    @abstractmethod
+    def run(
+        self,
+        params: GraphParams,
+        initial_state: GraphState,
+        clamps: Dict[str, jnp.ndarray],
+        structure: GraphStructure,
+        num_steps: int,
+    ) -> GraphState:
+        """Run inference for multiple steps."""
+        pass
+
+
+class StandardPCSolver(Solver):
+    """Standard parallel PC inference."""
+
+    def __init__(self, eta_infer: float = 0.1):
+        self.eta_infer = eta_infer
+
+    def step(self, params, state, clamps, structure):
+        return inference_step(params, state, clamps, structure, self.eta_infer)
+
+    def run(self, params, initial_state, clamps, structure, num_steps):
+        return run_inference(
+            params, initial_state, clamps, structure,
+            num_steps, self.eta_infer
+        )
+
+
+class IPCSolver(Solver):
+    """Incremental PC solver."""
+
+    def __init__(self, eta_infer: float = 0.1, update_order: str = "forward"):
+        self.eta_infer = eta_infer
+        self.update_order = update_order
+
+
+class AdaptivePCSolver(Solver):
+    """PC solver with dynamic learning rate scheduling."""
+
+    def __init__(self, base_eta: float = 0.1, strategy: str = "convergence_aware"):
+        self.base_eta = base_eta
+        self.strategy = strategy
+```
+
+---
+
+## Phase 4: Hypergraph Support
+
+### 4.1 Hierarchical Node Containers
+
+**Goal**: Enable nodes that contain subgraphs, allowing hierarchical network construction while maintaining PC semantics.
+
+```python
+# fabricpc/nodes/hypergraph.py
+"""
+Hypergraph support for hierarchical predictive coding networks.
+
+A HyperNode is a container that:
+1. Encapsulates a complete subgraph (GraphStructure, GraphParams, GraphState)
+2. Exposes external interface via defined input/output slots
+3. Runs internal PC inference during the parent graph's inference
+4. Propagates gradients between hierarchy levels
+
+This enables:
+- Modular network design (reusable subgraph components)
+- Hierarchical representations (cortical columns)
+- Memory efficiency (shared subgraph definitions)
+- Mixed abstraction levels
+"""
+
+from fabricpc.core.types import (
+    GraphParams, GraphState, GraphStructure,
+    NodeParams, NodeState, NodeInfo
+)
+from fabricpc.nodes.base import NodeBase, SlotSpec
+from fabricpc.nodes.registry import register_node
+
+@register_node("hypernode")
+class HyperNode(NodeBase):
+    """
+    A node that contains a complete subgraph.
+
+    The subgraph runs its own PC inference during each step of the
+    parent graph's inference. Input/output boundaries connect the
+    subgraph to the parent graph.
+
+    Configuration:
+    - subgraph_config: Configuration dict for internal graph
+    - input_mapping: Maps parent edges to subgraph input nodes
+    - output_mapping: Maps subgraph output nodes to this node's output
+    - internal_infer_steps: Number of inference steps per parent step
+    """
+
+    @staticmethod
+    def get_slots():
+        # Slots are dynamically defined based on subgraph inputs
+        # Default: single input that feeds subgraph input layer
+        return {
+            "in": SlotSpec(name="in", is_multi_input=True),
+        }
+
+    @staticmethod
+    def initialize_params(key, node_dim, input_dims, config):
+        """
+        Initialize both the hypernode's own parameters and its subgraph.
+        """
+        from fabricpc.graph.graph_net import create_pc_graph
+
+        subgraph_config = config["subgraph_config"]
+        key_sub, key_boundary = jax.random.split(key)
+
+        # Create internal subgraph
+        subgraph_params, subgraph_structure = create_pc_graph(
+            subgraph_config, key_sub
+        )
+
+        # Boundary transformation weights (optional)
+        # Maps from external input dim to subgraph input dim
+        boundary_weights = {}
+        for slot_name, ext_dim in input_dims.items():
+            internal_input = config["input_mapping"].get(slot_name)
+            if internal_input:
+                int_dim = subgraph_structure.nodes[internal_input].dim
+                key_boundary, subkey = jax.random.split(key_boundary)
+                boundary_weights[f"boundary_{slot_name}"] = (
+                    jax.random.normal(subkey, (ext_dim, int_dim)) * 0.01
+                )
+
+        return NodeParams(
+            weights={
+                **boundary_weights,
+                "_subgraph_weights": subgraph_params,  # Nested params
+            },
+            biases={}
+        )
+
+    @staticmethod
+    def forward(params, inputs, node_info, node_out_shape):
+        """
+        Forward pass runs internal subgraph inference.
+        """
+        config = node_info.node_config
+        subgraph_params = params.weights["_subgraph_weights"]
+        subgraph_structure = config["_subgraph_structure"]
+        internal_steps = config.get("internal_infer_steps", 5)
+        eta_internal = config.get("internal_eta", 0.1)
+
+        # Initialize subgraph state
+        batch_size = list(inputs.values())[0].shape[0]
+        subgraph_state = initialize_graph_state(
+            subgraph_structure, batch_size
+        )
+
+        # Apply boundary transformations and clamp subgraph inputs
+        clamps = {}
+        for edge_key, ext_input in inputs.items():
+            slot = edge_key.split(":")[-1]
+            internal_input = config["input_mapping"].get(slot)
+            if internal_input:
+                boundary_key = f"boundary_{slot}"
+                if boundary_key in params.weights:
+                    transformed = jnp.matmul(ext_input, params.weights[boundary_key])
+                else:
+                    transformed = ext_input
+                clamps[internal_input] = transformed
+
+        # Run internal inference
+        subgraph_state = run_inference(
+            subgraph_params, subgraph_state, clamps,
+            subgraph_structure, internal_steps, eta_internal
+        )
+
+        # Extract output from subgraph
+        output_node = config["output_mapping"]["out"]
+        z_mu = subgraph_state.nodes[output_node].z_latent
+
+        return z_mu, z_mu, {"_subgraph_state": subgraph_state}
+
+    @staticmethod
+    def compute_gradient(params, inputs, node_state, node_info, structure):
+        """
+        Propagate gradients through the hypernode.
+
+        The error at this node's output becomes the error signal
+        for the subgraph's output node, and we run inference
+        to propagate it backward through the subgraph.
+        """
+        config = node_info.node_config
+        subgraph_state = node_state.substructure["_subgraph_state"]
+        subgraph_structure = config["_subgraph_structure"]
+        subgraph_params = params.weights["_subgraph_weights"]
+
+        # Clamp output error and propagate backward
+        output_node = config["output_mapping"]["out"]
+        # Set the output node's error to match this node's error
+        subgraph_state = update_node_in_state(
+            subgraph_state, output_node,
+            error=node_state.error
+        )
+
+        # Run backward error propagation through subgraph
+        subgraph_state = compute_latent_gradients(
+            subgraph_state, subgraph_params, subgraph_structure
+        )
+
+        # Extract gradients for parent graph's source nodes
+        latent_grads = {node_info.name: node_state.error}
+
+        for edge_key, ext_input in inputs.items():
+            slot = edge_key.split(":")[-1]
+            source_name = structure.edges[edge_key].source
+            internal_input = config["input_mapping"].get(slot)
+
+            if internal_input:
+                # Get gradient from subgraph input node
+                internal_grad = subgraph_state.nodes[internal_input].latent_grad
+
+                # Apply boundary transformation (if any)
+                boundary_key = f"boundary_{slot}"
+                if boundary_key in params.weights:
+                    grad = jnp.matmul(internal_grad, params.weights[boundary_key].T)
+                else:
+                    grad = internal_grad
+
+                if source_name not in latent_grads:
+                    latent_grads[source_name] = jnp.zeros_like(ext_input)
+                latent_grads[source_name] = latent_grads[source_name] - grad
+
+        return latent_grads
+```
+
+### 4.2 Subgraph Sharing
+
+```python
+# fabricpc/graph/subgraph.py
+"""
+Utilities for subgraph sharing and reuse.
+
+Enables:
+- Define a subgraph template once, instantiate multiple times
+- Share weights across instances (weight tying)
+- Memory-efficient storage of replicated structures
+"""
+
+def create_subgraph_template(config: Dict[str, Any], key) -> Tuple[GraphStructure, GraphParams]:
+    """Create a reusable subgraph template."""
+    params, structure = create_pc_graph(config, key)
+    return structure, params
+
+
+def instantiate_hypernode(
+    template_structure: GraphStructure,
+    template_params: GraphParams,
+    instance_config: Dict[str, Any],
+    share_weights: bool = False,
+) -> Dict[str, Any]:
+    """
+    Create a hypernode config from a template.
+
+    Args:
+        share_weights: If True, instances share the template's parameters
+    """
+    return {
+        "type": "hypernode",
+        "subgraph_config": template_structure,
+        "initial_params": template_params if share_weights else None,
+        **instance_config
+    }
+```
+
+---
+
+## Phase 5: Developer Experience
+
+### 5.1 High-Level API
+
+```python
+# fabricpc/api.py
+"""
+High-level API for FabricPC.
+
+Provides a simple, PyTorch-like interface while maintaining
+the pure functional internals.
+"""
+
+class PCNetwork:
+    """
+    High-level wrapper for predictive coding networks.
+
+    Example:
+        # Define network
+        net = PCNetwork()
+        net.add_node("input", dim=784, activation="identity")
+        net.add_node("hidden1", dim=256, activation="relu")
+        net.add_node("hidden2", dim=128, activation="relu")
+        net.add_node("output", dim=10, activation="softmax")
+
+        net.connect("input", "hidden1")
+        net.connect("hidden1", "hidden2")
+        net.connect("hidden2", "output")
+
+        net.set_task_mapping(x="input", y="output")
+
+        # Initialize
+        net.init(jax.random.PRNGKey(0))
+
+        # Train
+        net.fit(train_loader, epochs=10, infer_steps=20)
+
+        # Predict
+        predictions = net.predict(x_test, infer_steps=50)
+    """
+
+    def __init__(self):
+        self._nodes = []
+        self._edges = []
+        self._task_map = {}
+        self._params = None
+        self._structure = None
+        self._optimizer_state = None
+
+    def add_node(
+        self,
+        name: str,
+        dim: int = None,
+        shape: Tuple[int, ...] = None,
+        node_type: str = "linear",
+        activation: str = "sigmoid",
+        **kwargs
+    ):
+        """Add a node to the network."""
+        if dim is None and shape is None:
+            raise ValueError("Must specify either dim or shape")
+
+        self._nodes.append({
+            "name": name,
+            "dim": dim or int(jnp.prod(jnp.array(shape))),
+            "shape": shape or (dim,),
+            "type": node_type,
+            "activation": {"type": activation},
+            **kwargs
+        })
+        return self
+
+    def connect(self, source: str, target: str, slot: str = "in"):
+        """Connect two nodes."""
+        self._edges.append({
+            "source_name": source,
+            "target_name": target,
+            "slot": slot
+        })
+        return self
+
+    def set_task_mapping(self, **kwargs):
+        """Map task names to nodes (x=input, y=output)."""
+        self._task_map = kwargs
+        return self
+
+    def init(self, key):
+        """Initialize network parameters."""
+        config = {
+            "node_list": self._nodes,
+            "edge_list": self._edges,
+            "task_map": self._task_map
+        }
+        self._params, self._structure = create_pc_graph(config, key)
+        return self
+
+    def fit(
+        self,
+        train_loader,
+        epochs: int = 10,
+        infer_steps: int = 20,
+        eta_infer: float = 0.1,
+        optimizer: str = "adam",
+        learning_rate: float = 1e-3,
+        solver: str = "standard",  # "standard", "ipc", "adaptive"
+        **kwargs
+    ):
+        """Train the network."""
+        self._params, history, self._optimizer_state = train_pcn(
+            self._params, self._structure, train_loader,
+            {
+                "num_epochs": epochs,
+                "infer_steps": infer_steps,
+                "eta_infer": eta_infer,
+                "optimizer": optimizer,
+                "learning_rate": learning_rate,
+            },
+            jax.random.PRNGKey(0)
+        )
+        return history
+
+    def predict(self, x, infer_steps: int = 50, eta_infer: float = 0.1):
+        """Generate predictions."""
+        batch_size = x.shape[0]
+        state = initialize_graph_state(self._structure, batch_size)
+
+        # Clamp input
+        input_node = self._task_map.get("x")
+        clamps = {input_node: x}
+
+        # Run inference
+        state = run_inference(
+            self._params, state, clamps,
+            self._structure, infer_steps, eta_infer
+        )
+
+        # Return output
+        output_node = self._task_map.get("y")
+        return state.nodes[output_node].z_latent
+```
+
+### 5.2 Model Serialization
+
+```python
+# fabricpc/utils/serialization.py
+"""
+Save and load FabricPC models.
+"""
+
+import pickle
+from pathlib import Path
+
+def save_model(
+    path: str,
+    params: GraphParams,
+    structure: GraphStructure,
+    optimizer_state = None,
+    metadata: Dict = None
+):
+    """Save model to disk."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    checkpoint = {
+        "params": jax.device_get(params),
+        "structure": structure,
+        "optimizer_state": optimizer_state,
+        "metadata": metadata or {},
+        "version": "0.2.0",
+    }
+
+    with open(path, "wb") as f:
+        pickle.dump(checkpoint, f)
+
+
+def load_model(path: str) -> Tuple[GraphParams, GraphStructure, Any, Dict]:
+    """Load model from disk."""
+    with open(path, "rb") as f:
+        checkpoint = pickle.load(f)
+
+    return (
+        checkpoint["params"],
+        checkpoint["structure"],
+        checkpoint.get("optimizer_state"),
+        checkpoint.get("metadata", {})
+    )
+```
+
+### 5.3 Callbacks and Logging
+
+```python
+# fabricpc/training/callbacks.py
+"""
+Training callbacks for monitoring and control.
+"""
+
+from abc import ABC, abstractmethod
+from typing import Any, Dict
+
+class Callback(ABC):
+    """Base callback class."""
+
+    def on_epoch_start(self, epoch: int, logs: Dict): pass
+    def on_epoch_end(self, epoch: int, logs: Dict): pass
+    def on_batch_start(self, batch: int, logs: Dict): pass
+    def on_batch_end(self, batch: int, logs: Dict): pass
+    def on_inference_step(self, step: int, state: GraphState): pass
+
+
+class EarlyStopping(Callback):
+    """Stop training when loss stops improving."""
+
+    def __init__(self, patience: int = 5, min_delta: float = 1e-4):
+        self.patience = patience
+        self.min_delta = min_delta
+        self.best_loss = float('inf')
+        self.wait = 0
+
+    def on_epoch_end(self, epoch, logs):
+        loss = logs.get("loss", float('inf'))
+        if loss < self.best_loss - self.min_delta:
+            self.best_loss = loss
+            self.wait = 0
+        else:
+            self.wait += 1
+            if self.wait >= self.patience:
+                logs["stop_training"] = True
+
+
+class EnergyMonitor(Callback):
+    """Monitor per-node energy during inference."""
+
+    def __init__(self, log_frequency: int = 10):
+        self.log_frequency = log_frequency
+        self.energy_history = []
+
+    def on_inference_step(self, step, state):
+        if step % self.log_frequency == 0:
+            energies = {
+                name: float(ns.energy)
+                for name, ns in state.nodes.items()
+            }
+            self.energy_history.append(energies)
+
+
+class TensorBoardLogger(Callback):
+    """Log to TensorBoard."""
+
+    def __init__(self, log_dir: str):
+        from torch.utils.tensorboard import SummaryWriter
+        self.writer = SummaryWriter(log_dir)
+        self.step = 0
+
+    def on_epoch_end(self, epoch, logs):
+        for key, value in logs.items():
+            if isinstance(value, (int, float)):
+                self.writer.add_scalar(key, value, epoch)
+        self.step += 1
+```
+
+---
+
+## Phase 6: Demos and Documentation
+
+### 6.1 Demo: Transformer for Text Classification
+
+```python
+# fabricpc/examples/transformer_text_demo.py
+"""
+Text Classification with Predictive Coding Transformers
+
+This demo shows how to build a transformer-based text classifier
+using FabricPC's predictive coding framework.
+
+Key innovations demonstrated:
+1. Self-attention with PC inference
+2. Local learning in transformer blocks
+3. Efficient inference with adaptive scheduling
+"""
+
+def create_pc_transformer(
+    vocab_size: int,
+    embed_dim: int = 256,
+    num_heads: int = 8,
+    num_layers: int = 4,
+    num_classes: int = 2,
+    max_seq_len: int = 512,
+):
+    """Create a predictive coding transformer for text classification."""
+
+    net = PCNetwork()
+
+    # Input embedding (tokens -> embeddings)
+    net.add_node("input", dim=vocab_size, activation="identity")
+    net.add_node("embedding", dim=embed_dim, node_type="linear", activation="identity")
+
+    # Positional encoding
+    net.add_node("pos_encoding", dim=embed_dim, node_type="positional_encoding",
+                 max_len=max_seq_len)
+
+    # Transformer layers
+    prev_layer = "embedding"
+    for i in range(num_layers):
+        layer_name = f"transformer_{i}"
+        net.add_node(layer_name, dim=embed_dim, node_type="transformer_block",
+                    num_heads=num_heads, ffn_dim=embed_dim * 4)
+        net.connect(prev_layer, layer_name)
+        if i == 0:
+            net.connect("pos_encoding", layer_name, slot="position")
+        prev_layer = layer_name
+
+    # Classification head
+    net.add_node("pool", dim=embed_dim, node_type="mean_pool")
+    net.add_node("classifier", dim=num_classes, activation="softmax")
+
+    net.connect("input", "embedding")
+    net.connect(prev_layer, "pool")
+    net.connect("pool", "classifier")
+
+    net.set_task_mapping(x="input", y="classifier")
+
+    return net
+
+
+# Training script
+if __name__ == "__main__":
+    import jax
+    from fabricpc.training.data_utils import load_imdb_dataset
+
+    # Load data
+    train_loader, test_loader, vocab = load_imdb_dataset(batch_size=32)
+
+    # Create model
+    model = create_pc_transformer(
+        vocab_size=len(vocab),
+        embed_dim=256,
+        num_heads=8,
+        num_layers=4,
+        num_classes=2,
+    )
+    model.init(jax.random.PRNGKey(42))
+
+    # Train with adaptive solver
+    history = model.fit(
+        train_loader,
+        epochs=10,
+        infer_steps=30,
+        solver="adaptive",
+        optimizer="adamw",
+        learning_rate=1e-4,
+    )
+
+    # Evaluate
+    accuracy = model.evaluate(test_loader)
+    print(f"Test accuracy: {accuracy:.4f}")
+```
+
+### 6.2 Demo: ConvNet for Time Series
+
+```python
+# fabricpc/examples/conv_timeseries_demo.py
+"""
+Time Series Classification with Predictive Coding ConvNets
+
+This demo shows how to build a 1D convolutional network for
+multivariate time series classification using FabricPC.
+
+Demonstrates:
+1. Conv1D nodes for temporal feature extraction
+2. Multi-scale feature hierarchies
+3. PC inference for temporal prediction
+"""
+
+def create_pc_convnet(
+    input_channels: int,
+    seq_length: int,
+    num_classes: int,
+    base_filters: int = 32,
+):
+    """Create a PC-ConvNet for time series classification."""
+
+    net = PCNetwork()
+
+    # Input layer (batch, seq_len, channels)
+    net.add_node("input", shape=(seq_length, input_channels), activation="identity")
+
+    # Conv blocks with increasing receptive field
+    prev = "input"
+    channels = [base_filters, base_filters * 2, base_filters * 4]
+
+    for i, ch in enumerate(channels):
+        conv_name = f"conv_{i}"
+        bn_name = f"bn_{i}"
+
+        net.add_node(conv_name, shape=(seq_length // (2**i), ch),
+                    node_type="conv1d", kernel_size=5, stride=2,
+                    activation="relu")
+        net.add_node(bn_name, shape=(seq_length // (2**i), ch),
+                    node_type="batch_norm")
+
+        net.connect(prev, conv_name)
+        net.connect(conv_name, bn_name)
+        prev = bn_name
+
+    # Global average pooling
+    net.add_node("gap", dim=channels[-1], node_type="global_avg_pool1d")
+    net.connect(prev, "gap")
+
+    # Classification
+    net.add_node("fc", dim=64, activation="relu")
+    net.add_node("output", dim=num_classes, activation="softmax")
+
+    net.connect("gap", "fc")
+    net.connect("fc", "output")
+
+    net.set_task_mapping(x="input", y="output")
+
+    return net
+
+
+if __name__ == "__main__":
+    from fabricpc.training.data_utils import load_ucr_dataset
+
+    # Load UCR dataset (e.g., ECG200)
+    train_loader, test_loader, metadata = load_ucr_dataset("ECG200", batch_size=32)
+
+    model = create_pc_convnet(
+        input_channels=1,
+        seq_length=metadata["seq_length"],
+        num_classes=metadata["num_classes"],
+    )
+    model.init(jax.random.PRNGKey(42))
+
+    # Train with iPC solver (good for deep convnets)
+    history = model.fit(
+        train_loader,
+        epochs=50,
+        infer_steps=25,
+        solver="ipc",
+        optimizer="adam",
+        learning_rate=1e-3,
+    )
+
+    accuracy = model.evaluate(test_loader)
+    print(f"Test accuracy: {accuracy:.4f}")
+```
+
+### 6.3 Demo: Deep PC Networks with Hypergraphs
+
+```python
+# fabricpc/examples/hypergraph_demo.py
+"""
+Hierarchical Predictive Coding with Hypergraphs
+
+This demo shows how to build deep hierarchical networks using
+FabricPC's hypergraph support. Each level of the hierarchy
+is a complete PC network that runs internal inference.
+
+This models cortical columns with:
+- Local recurrent processing
+- Hierarchical message passing
+- Top-down predictions and bottom-up errors
+"""
+
+def create_cortical_column(embed_dim: int, name_prefix: str):
+    """Create a cortical column subgraph template."""
+    return {
+        "node_list": [
+            {"name": f"{name_prefix}_L4", "dim": embed_dim, "activation": "relu"},
+            {"name": f"{name_prefix}_L2/3", "dim": embed_dim, "activation": "relu"},
+            {"name": f"{name_prefix}_L5", "dim": embed_dim, "activation": "relu"},
+            {"name": f"{name_prefix}_L6", "dim": embed_dim, "activation": "relu"},
+        ],
+        "edge_list": [
+            # Bottom-up pathway
+            {"source_name": f"{name_prefix}_L4", "target_name": f"{name_prefix}_L2/3", "slot": "in"},
+            # Lateral and feedback
+            {"source_name": f"{name_prefix}_L2/3", "target_name": f"{name_prefix}_L5", "slot": "in"},
+            {"source_name": f"{name_prefix}_L5", "target_name": f"{name_prefix}_L6", "slot": "in"},
+            {"source_name": f"{name_prefix}_L6", "target_name": f"{name_prefix}_L4", "slot": "in"},
+        ],
+        "task_map": {
+            "input": f"{name_prefix}_L4",
+            "output": f"{name_prefix}_L2/3",
+        }
+    }
+
+
+def create_hierarchical_pc_network(
+    input_dim: int,
+    num_levels: int = 4,
+    embed_dim: int = 128,
+    output_dim: int = 10,
+):
+    """Create a hierarchical PC network with cortical columns."""
+
+    net = PCNetwork()
+
+    # Input
+    net.add_node("input", dim=input_dim, activation="identity")
+
+    # Hierarchical cortical columns
+    prev = "input"
+    for level in range(num_levels):
+        column_config = create_cortical_column(embed_dim, f"column_{level}")
+
+        net.add_node(
+            f"column_{level}",
+            dim=embed_dim,
+            node_type="hypernode",
+            subgraph_config=column_config,
+            input_mapping={"in": f"column_{level}_L4"},
+            output_mapping={"out": f"column_{level}_L2/3"},
+            internal_infer_steps=5,
+        )
+
+        net.connect(prev, f"column_{level}")
+        prev = f"column_{level}"
+
+    # Output
+    net.add_node("output", dim=output_dim, activation="softmax")
+    net.connect(prev, "output")
+
+    net.set_task_mapping(x="input", y="output")
+
+    return net
+```
+
+---
+
+## Phase 7: Performance and Testing
+
+### 7.1 Benchmarking Suite
+
+```python
+# fabricpc/benchmarks/benchmark_suite.py
+"""
+Comprehensive benchmarking for FabricPC.
+"""
+
+def benchmark_inference_speed():
+    """Benchmark inference iterations per second."""
+    pass
+
+def benchmark_training_throughput():
+    """Benchmark samples per second during training."""
+    pass
+
+def benchmark_memory_usage():
+    """Profile memory usage for various network sizes."""
+    pass
+
+def benchmark_scaling():
+    """Test scaling across GPUs/TPUs."""
+    pass
+```
+
+### 7.2 Test Coverage
+
+**Required Tests**:
+- [ ] Unit tests for each node type
+- [ ] Integration tests for graph construction
+- [ ] Gradient correctness tests (numerical vs analytical)
+- [ ] Solver convergence tests
+- [ ] Multi-GPU correctness tests
+- [ ] Serialization round-trip tests
+- [ ] API compatibility tests
+- [ ] Performance regression tests
+
+---
+
+## Implementation Priority
+
+### Immediate (Phase 1-2)
+1. N-dimensional tensor support
+2. Plugin architecture
+3. LayerNorm and BatchNorm nodes
+4. Conv2D node
+5. Softmax node
+
+### Near-term (Phase 3)
+1. Multi-head attention
+2. Transformer block
+3. iPC solver
+4. Dynamic scheduler
+
+### Medium-term (Phase 4-5)
+1. Hypergraph support
+2. High-level API
+3. Serialization
+4. Callbacks
+
+### Long-term (Phase 6-7)
+1. Comprehensive demos
+2. Documentation site
+3. Benchmarking suite
+4. Community examples
+
+---
+
+## Additional Considerations
+
+### API Stability
+- Maintain backward compatibility within major versions
+- Deprecation warnings before breaking changes
+- Semantic versioning
+
+### Documentation
+- API reference (auto-generated from docstrings)
+- Tutorials for common use cases
+- Theoretical background on PC
+- Contributing guidelines
+
+### Community
+- GitHub discussions for questions
+- Issue templates for bugs/features
+- Example gallery (community contributed)
+- Citation file for academic use
+
+### Performance Targets
+- MNIST training: <10s (single GPU)
+- Inference step: <1ms for 1000-node graph
+- Memory: Linear in batch size
+- Multi-GPU scaling: >80% efficiency
+
+---
+
+## References
+
+1. Rao & Ballard (1999) - Predictive Coding in Visual Cortex
+2. Whittington & Bogacz (2017) - Approximation of Backprop by PC
+3. Millidge et al. (2022) - Predictive Coding: A Theoretical and Experimental Review
+4. Salvatori et al. (2022) - Incremental Predictive Coding
+5. Song et al. (2024) - Inferring Neural Activity Before Plasticity
+
+---
+
+*This roadmap is a living document. Update as development progresses.*

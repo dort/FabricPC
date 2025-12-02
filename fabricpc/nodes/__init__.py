@@ -7,7 +7,7 @@ from fabricpc.nodes.base import (
     Slot,
     NodeBase,
 )
-from fabricpc.nodes.linear import LinearNode
+from fabricpc.nodes.linear import LinearNode, LinearAutoGradNode
 
 from typing import Type
 def get_node_class_from_type(node_type: str) -> Type[NodeBase]:
@@ -22,6 +22,7 @@ def get_node_class_from_type(node_type: str) -> Type[NodeBase]:
 
     node_types = {
         "linear": LinearNode,
+        "linear_autograd": LinearAutoGradNode,
     }
 
     if node_type.lower() not in node_types:
@@ -37,4 +38,5 @@ __all__ = [
     "NodeBase",
     "get_node_class_from_type",
     "LinearNode",
+    "LinearAutoGradNode",
 ]
