@@ -32,8 +32,41 @@ def _validate_node_class(node_class: Type[NodeBase], node_type: str) -> None:
         node_type: The type name being registered (for error messages)
 
     Raises:
-        NodeRegistrationError: If required methods are missing or abstract
+        NodeRegistrationError: If required methods/attributes are missing or abstract
     """
+    # Check for required CONFIG_SCHEMA attribute
+    if not hasattr(node_class, 'CONFIG_SCHEMA'):
+        raise NodeRegistrationError(
+            f"Node type '{node_type}': missing required CONFIG_SCHEMA attribute. "
+            f"Use empty dict {{}} if no additional config parameters are needed."
+        )
+
+    # Validate CONFIG_SCHEMA is a dict
+    if not isinstance(node_class.CONFIG_SCHEMA, dict):
+        raise NodeRegistrationError(
+            f"Node type '{node_type}': CONFIG_SCHEMA must be a dict, "
+            f"got {type(node_class.CONFIG_SCHEMA).__name__}"
+        )
+
+    # Check for required DEFAULT_ENERGY_CONFIG attribute
+    if not hasattr(node_class, 'DEFAULT_ENERGY_CONFIG'):
+        raise NodeRegistrationError(
+            f"Node type '{node_type}': missing required DEFAULT_ENERGY_CONFIG attribute. "
+            f"Use {{'type': 'gaussian'}} for standard MSE energy."
+        )
+
+    # Validate DEFAULT_ENERGY_CONFIG is a dict with "type" key
+    if not isinstance(node_class.DEFAULT_ENERGY_CONFIG, dict):
+        raise NodeRegistrationError(
+            f"Node type '{node_type}': DEFAULT_ENERGY_CONFIG must be a dict, "
+            f"got {type(node_class.DEFAULT_ENERGY_CONFIG).__name__}"
+        )
+    if "type" not in node_class.DEFAULT_ENERGY_CONFIG:
+        raise NodeRegistrationError(
+            f"Node type '{node_type}': DEFAULT_ENERGY_CONFIG must have a 'type' key"
+        )
+
+    # Check for required methods
     required_methods = ['get_slots', 'initialize_params', 'forward']
 
     for method_name in required_methods:

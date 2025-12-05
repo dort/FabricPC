@@ -31,9 +31,6 @@ from fabricpc.nodes.linear import LinearNode, LinearExplicitGrad
 # Discover external nodes from installed packages
 discover_external_nodes()
 
-# Backward compatibility alias
-get_node_class_from_type = get_node_class
-
 __all__ = [
     # Base classes and mixins
     "SlotSpec",
@@ -43,7 +40,6 @@ __all__ = [
     # Registry
     "register_node",
     "get_node_class",
-    "get_node_class_from_type",  # deprecated alias
     "list_node_types",
     "unregister_node",
     "clear_registry",

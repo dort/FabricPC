@@ -27,7 +27,7 @@ from fabricpc.core.initialization import (
     parse_state_init_config,
     get_default_state_init,
 )
-from fabricpc.nodes import get_node_class_from_type, validate_node_config
+from fabricpc.nodes import get_node_class, validate_node_config
 from fabricpc.core.inference import gather_inputs
 from fabricpc.utils.helpers import update_node_in_state
 
@@ -53,7 +53,7 @@ def validate_node_and_build_slots(
     """
     default_node = "Linear"  # TODO change default to empty or raise error when missing from config
     node_type = node_config.get("type", default_node).lower()
-    node_class = get_node_class_from_type(node_type)
+    node_class = get_node_class(node_type)
 
     # Get slot specifications from node class
     slot_specs = node_class.get_slots()
@@ -89,6 +89,14 @@ def validate_node_and_build_slots(
                     f"Edge '{edge_key}' connects to non-existent slot '{edge_info.slot}' "
                     f"in node '{node_name}'. Available slots: {list(slots.keys())}"
                 )
+
+    # Validate that SingleInput slots have no more than one incoming edge
+    for slot_name, slot_info in slots.items():
+        if not slot_info.is_multi_input and len(slot_info.in_neighbors) > 1:
+            raise ValueError(
+                f"Node '{node_name}' slot '{slot_name}' is single-input but has "
+                f"{len(slot_info.in_neighbors)} incoming edges"
+            )
 
     return slots
 
@@ -173,6 +181,7 @@ def build_graph_structure(config: dict) -> GraphStructure:
     # Build nodes with validated slots
     nodes: Dict[str, NodeInfo] = {}
 
+    # TODO refactor node construction to validate node config and construct node using base class method. Pass the in-edges and out-edges to the node construction methods. Build the slot, energy functional, and activation function at node level.
     for node_config in node_list:
         name = node_config["name"]
 
@@ -185,8 +194,24 @@ def build_graph_structure(config: dict) -> GraphStructure:
         activation_config = node_config.get("activation", {"type": "identity"})
 
         # Validate config against node's CONFIG_SCHEMA and apply defaults
-        node_class = get_node_class_from_type(node_type)
+        node_class = get_node_class(node_type)
         validated_config = validate_node_config(node_class, node_config)
+
+        # Apply energy config: use user-specified or node class default
+        from fabricpc.core.energy import get_energy_class, validate_energy_config
+        energy_config = validated_config.get("energy", None)
+        if energy_config is None:
+            # Use node class default
+            energy_config = node_class.DEFAULT_ENERGY_CONFIG.copy()
+        elif isinstance(energy_config, str):
+            # Allow shorthand: "energy": "bernoulli"
+            energy_config = {"type": energy_config}
+
+        # Validate energy config
+        energy_type = energy_config.get("type", "gaussian")
+        energy_class = get_energy_class(energy_type)
+        validated_energy = validate_energy_config(energy_class, energy_config)
+        validated_config["energy"] = validated_energy
 
         # Validate and build slots
         slots = validate_node_and_build_slots(validated_config, name, edges)
@@ -194,7 +219,6 @@ def build_graph_structure(config: dict) -> GraphStructure:
         # Find incoming and outgoing edges
         in_edges: List[str] = []
         out_edges: List[str] = []
-
         for edge_key, edge_info in edges.items():
             if edge_info.target == name:
                 in_edges.append(edge_key)
@@ -302,7 +326,7 @@ def initialize_params(
             continue
 
         # Get node class
-        node_class = get_node_class_from_type(node_info.node_type)
+        node_class = get_node_class(node_info.node_type)
 
         # Get the input shapes for each edge (full shapes for conv support)
         input_shapes = {}
@@ -412,7 +436,7 @@ def initialize_state(
                 # Collect edge inputs
                 node_state = state.nodes[node_name]
                 node_params = params.nodes[node_name]
-                node_class = get_node_class_from_type(node_info.node_type)
+                node_class = get_node_class(node_info.node_type)
                 edge_inputs = gather_inputs(node_info, structure, state)
 
                 # Compute forward projection

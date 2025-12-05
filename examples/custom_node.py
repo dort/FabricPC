@@ -129,8 +129,8 @@ class Conv2DNode(NodeBase):
 
         Computes: conv2d(x, kernel) + bias -> activation -> error -> energy
         """
-        from fabricpc.nodes import get_node_class_from_type
-        node_class = get_node_class_from_type(node_info.node_type)
+        from fabricpc.nodes import get_node_class
+        node_class = get_node_class(node_info.node_type)
 
         config = node_info.node_config
         stride = config.get("stride", (1, 1))

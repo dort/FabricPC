@@ -119,7 +119,26 @@ class NodeBase(ABC):
 
     All methods are pure functions (no side effects) for JAX compatibility.
     Nodes can have multiple input slots and custom transfer functions.
+
+    Required class attributes (validated during registration):
+        - CONFIG_SCHEMA: dict specifying node configuration validation
+        - DEFAULT_ENERGY_CONFIG: dict specifying default energy functional
+
+    Example:
+        @register_node("my_node")
+        class MyNode(NodeBase):
+            CONFIG_SCHEMA = {
+                "my_param": {"type": int, "default": 10}
+            }
+            ...
     """
+
+    # CONFIG_SCHEMA is required - subclasses must define it
+    # Use empty dict {} if no additional config parameters are needed
+    CONFIG_SCHEMA: Dict[str, Any]
+
+    # DEFAULT_ENERGY_CONFIG - Can be overridden by default in subclass and per-node via node_config["energy"]
+    DEFAULT_ENERGY_CONFIG: Dict[str, Any] = {"type": "gaussian"}
 
     @staticmethod
     @abstractmethod
@@ -190,8 +209,8 @@ class NodeBase(ABC):
                 - NodeState: updated node state (z_mu, pre_activation, etc.)
                 - gradient_wrt_inputs: dictionary of gradients w.r.t. each input edge
         """
-        from fabricpc.nodes import get_node_class_from_type
-        node_class = get_node_class_from_type(node_info.node_type)
+        from fabricpc.nodes import get_node_class
+        node_class = get_node_class(node_info.node_type)
 
         # Use JAX's value_and_grad to compute gradients w.r.t. inputs
         (total_energy, new_state), input_grads = jax.value_and_grad(
@@ -225,8 +244,8 @@ class NodeBase(ABC):
                 - NodeState: updated node state (z_mu, pre_activation, etc.)
                 - params_grad: NodeParams containing weight and bias gradients
         """
-        from fabricpc.nodes import get_node_class_from_type
-        node_class = get_node_class_from_type(node_info.node_type)
+        from fabricpc.nodes import get_node_class
+        node_class = get_node_class(node_info.node_type)
 
         # Use JAX's value_and_grad to compute gradients w.r.t. params
         (total_energy, new_state), params_grad = jax.value_and_grad(
@@ -271,23 +290,39 @@ class NodeBase(ABC):
         """
         Compute the energy and the derivative with respect to the node's latent state.
 
+        The energy functional to use is determined by node_info.node_config["energy"].
+        If not specified, the node class's DEFAULT_ENERGY_CONFIG is used during
+        graph construction.
+
+        Energy config format:
+            {
+                "energy": {
+                    "type": "gaussian",  # or "binaryce", "crossentropy", etc.
+                    "precision": 1.0     # energy-specific parameters
+                }
+            }
+
         Args:
             state: NodeState object (contains z_latent, z_mu, etc.)
-            node_info: NodeInfo object (may contain energy functional info)
+            node_info: NodeInfo object (contains energy config in node_config)
 
         Returns:
-        Updated NodeState with
-            energy: energy value per batch element
-            latent_grad: derivative of energy w.r.t. z_latent
+            Updated NodeState with:
+                energy: energy value per batch element, shape (batch_size,)
+                latent_grad: derivative of energy w.r.t. z_latent (accumulated)
         """
-        # 1. Compute energy: E = 0.5 * ||error||^2
-        # Sum over ALL non-batch dimensions (supports arbitrary tensor shapes)
-        axes_to_sum = tuple(range(1, len(state.error.shape)))
-        energy = 0.5 * jnp.sum(state.error ** 2, axis=axes_to_sum)
+        from fabricpc.core.energy import get_energy_and_gradient
 
-        # 2. Compute latent gradient: dE/dz_latent
-        grad = state.error  # derivative of energy w.r.t. z_latent
-        latent_grad = state.latent_grad + grad  # accumulate with existing latent_grad
+        # Get energy config from node_config (should be set during graph construction)
+        energy_config = node_info.node_config.get("energy", None)
+        if energy_config is None:
+            raise ValueError(f"graph was improperly constructed. Node {node_info.name} is missing default energy functional.")
+
+        # Compute energy and gradient using the energy registry
+        energy, grad = get_energy_and_gradient(state.z_latent, state.z_mu, energy_config)
+
+        # Accumulate gradient with existing latent_grad
+        latent_grad = state.latent_grad + grad
 
         # Update node state
         state = state._replace(energy=energy, latent_grad=latent_grad)
@@ -295,12 +330,19 @@ class NodeBase(ABC):
         return state
 
     @staticmethod
-    def get_energy_functional(energy_name: str) -> Tuple[Any, Any, Any]:
+    def get_energy_functional(energy_name: str):
         """
-        Retrieve the energy functional by name.
+        Retrieve an energy functional class by name.
+
         Args:
             energy_name: Name of the energy functional (e.g., "gaussian", "bernoulli")
+
         Returns:
-            Energy functional function, gradient function, and jacobian function
+            The EnergyFunctional class
+
+        Example:
+            energy_class = NodeBase.get_energy_functional("bernoulli")
+            energy = energy_class.energy(z_latent, z_mu, config)
         """
-        pass
+        from fabricpc.core.energy import get_energy_class
+        return get_energy_class(energy_name)

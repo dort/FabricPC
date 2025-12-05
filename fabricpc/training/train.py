@@ -12,7 +12,7 @@ import optax
 
 from fabricpc.core.types import GraphParams, GraphState, GraphStructure
 from fabricpc.core.inference import run_inference, gather_inputs
-from fabricpc.nodes import get_node_class_from_type
+from fabricpc.nodes import get_node_class
 from fabricpc.core.types import NodeParams
 
 
@@ -47,7 +47,7 @@ def compute_local_weight_gradients(
         in_edges_data = gather_inputs(node_info, structure, final_state)
 
         # Get node class
-        node_class = get_node_class_from_type(node_info.node_type)
+        node_class = get_node_class(node_info.node_type)
 
         # Compute local gradients using node's method
         node_state, grad_params = node_class.forward_learning(

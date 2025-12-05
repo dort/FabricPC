@@ -27,7 +27,7 @@ from fabricpc.nodes.registry import (
 from fabricpc.nodes import (
     LinearNode,
     LinearExplicitGrad,
-    get_node_class_from_type,
+    get_node_class,
 )
 from fabricpc.core.types import NodeParams, NodeState, NodeInfo
 from fabricpc.graph.graph_net import create_pc_graph
@@ -61,9 +61,9 @@ class TestNodeRegistration:
         assert "unknown_node_type" in str(exc_info.value)
 
     def test_backward_compatibility_alias(self):
-        """Test that get_node_class_from_type still works."""
-        assert get_node_class_from_type("linear") is LinearNode
-        assert get_node_class_from_type is get_node_class
+        """Test that get_node_class still works."""
+        assert get_node_class("linear") is LinearNode
+        assert get_node_class is get_node_class
 
 
 class TestCustomNodeRegistration:
@@ -73,6 +73,8 @@ class TestCustomNodeRegistration:
         """Test registering a custom node type."""
         @register_node("test_custom")
         class TestCustomNode(NodeBase):
+            CONFIG_SCHEMA = {}
+
             @staticmethod
             def get_slots():
                 return {"in": SlotSpec(name="in", is_multi_input=True)}
@@ -95,6 +97,8 @@ class TestCustomNodeRegistration:
         """Test that registering same type with different class raises."""
         @register_node("test_dup")
         class TestNode1(NodeBase):
+            CONFIG_SCHEMA = {}
+
             @staticmethod
             def get_slots():
                 return {"in": SlotSpec(name="in", is_multi_input=True)}
@@ -111,6 +115,8 @@ class TestCustomNodeRegistration:
             with pytest.raises(NodeRegistrationError) as exc_info:
                 @register_node("test_dup")
                 class TestNode2(NodeBase):
+                    CONFIG_SCHEMA = {}
+
                     @staticmethod
                     def get_slots():
                         return {"in": SlotSpec(name="in", is_multi_input=True)}
@@ -131,6 +137,8 @@ class TestCustomNodeRegistration:
         """Test that registering same class twice is OK."""
         @register_node("test_idem")
         class TestIdemNode(NodeBase):
+            CONFIG_SCHEMA = {}
+
             @staticmethod
             def get_slots():
                 return {"in": SlotSpec(name="in", is_multi_input=True)}
@@ -154,6 +162,8 @@ class TestCustomNodeRegistration:
         """Test that unregister_node removes the node type."""
         @register_node("test_unreg")
         class TestUnregNode(NodeBase):
+            CONFIG_SCHEMA = {}
+
             @staticmethod
             def get_slots():
                 return {"in": SlotSpec(name="in", is_multi_input=True)}
@@ -174,11 +184,32 @@ class TestCustomNodeRegistration:
 class TestInterfaceValidation:
     """Test that nodes must implement required interface."""
 
+    def test_missing_config_schema_raises(self):
+        """Test that missing CONFIG_SCHEMA raises error."""
+        with pytest.raises(NodeRegistrationError) as exc_info:
+            @register_node("test_missing_schema")
+            class MissingSchemaNode(NodeBase):
+                @staticmethod
+                def get_slots():
+                    return {"in": SlotSpec(name="in", is_multi_input=True)}
+
+                @staticmethod
+                def initialize_params(key, node_shape, input_shapes, config):
+                    return NodeParams(weights={}, biases={})
+
+                @staticmethod
+                def forward(params, inputs, state, node_info):
+                    return jnp.array(0.0), state
+
+        assert "CONFIG_SCHEMA" in str(exc_info.value)
+
     def test_missing_forward_raises(self):
         """Test that missing forward method raises error."""
         with pytest.raises(NodeRegistrationError) as exc_info:
             @register_node("test_missing_forward")
             class MissingForwardNode(NodeBase):
+                CONFIG_SCHEMA = {}
+
                 @staticmethod
                 def get_slots():
                     return {"in": SlotSpec(name="in", is_multi_input=True)}
@@ -196,12 +227,16 @@ class TestInterfaceValidation:
 class TestConfigValidation:
     """Test config schema validation."""
 
-    def test_no_schema_passthrough(self):
-        """Test that nodes without CONFIG_SCHEMA pass config through."""
-        # LinearNode has no CONFIG_SCHEMA
+    def test_schema_applies_defaults(self):
+        """Test that LinearNode's CONFIG_SCHEMA applies defaults."""
         config = {"name": "test", "shape": (10,), "custom_field": "value"}
         result = validate_node_config(LinearNode, config)
-        assert result == config
+        # Original fields preserved
+        assert result["name"] == "test"
+        assert result["custom_field"] == "value"
+        # Defaults applied from LinearNode.CONFIG_SCHEMA
+        assert result["use_bias"] == True
+        assert result["weight_init"]["type"] == "normal"
 
     def test_required_field_missing_raises(self):
         """Test that missing required field raises ValueError."""

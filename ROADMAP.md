@@ -67,24 +67,19 @@ class MyCustomNode(NodeBase):
     ...
 ```
 
-
 ### 1.3 Configurable Energy Functionals
 
 **Current State**: Hard-coded Gaussian energy `E = ½||z - μ||²`.
 
 **Requirements**:
-- [ ] Define energy functional interface
-- [ ] Implement Gaussian (default), Bernoulli, Categorical energies
-- [ ] Per-node energy configuration
-- [ ] Custom energy functional support
+- [x] Define energy functional interface
+- [x] Implement Gaussian (default), Bernoulli, CrossEntrpoy energies
+- [x] Per-node energy configuration
+- [x] Custom energy functional support
 
 **Implementation**:
 ```python
 # fabricpc/core/energy.py
-from abc import ABC, abstractmethod
-from typing import Tuple
-import jax.numpy as jnp
-
 class EnergyFunctional(ABC):
     """Base class for energy functionals."""
 
@@ -96,42 +91,16 @@ class EnergyFunctional(ABC):
 
     @staticmethod
     @abstractmethod
-    def error(z_latent: jnp.ndarray, z_mu: jnp.ndarray) -> jnp.ndarray:
+    def grad_latent(z_latent: jnp.ndarray, z_mu: jnp.ndarray) -> jnp.ndarray:
         """Compute ∂E/∂z_latent."""
         pass
-
 class GaussianEnergy(EnergyFunctional):
     """Gaussian energy: E = ½||z - μ||²"""
-
-    @staticmethod
-    def energy(z_latent, z_mu):
-        diff = z_latent - z_mu
-        return 0.5 * jnp.sum(diff ** 2, axis=-1)
-
-    @staticmethod
-    def error(z_latent, z_mu):
-        return z_latent - z_mu
-
 class BernoulliEnergy(EnergyFunctional):
     """Bernoulli energy for binary outputs."""
-
-    @staticmethod
-    def energy(z_latent, z_mu):
-        eps = 1e-7
-        z_mu = jnp.clip(z_mu, eps, 1 - eps)
-        return -jnp.sum(
-            z_latent * jnp.log(z_mu) + (1 - z_latent) * jnp.log(1 - z_mu),
-            axis=-1
-        )
-
-    @staticmethod
-    def error(z_latent, z_mu):
-        eps = 1e-7
-        z_mu = jnp.clip(z_mu, eps, 1 - eps)
-        return (z_mu - z_latent) / (z_mu * (1 - z_mu))
+class CrossEntropyEnergy(EnergyFunctional):
+    """Cross-entropy energy for multi-class outputs."""
 ```
-
----
 
 ## Phase 2: Core Node Types
 
@@ -369,38 +338,19 @@ class Conv2DNode(NodeBase):
 
         return jnp.sum(energy), state
 
-    @staticmethod
-    def forward_inference(params, inputs, state, node_info):
-        """
-        Forward pass with input gradient computation using transposed convolution.
-
-        For conv: y = conv(x, W)
-        Gradient: ∂L/∂x = conv_transpose(∂L/∂y, W)
-        """
-        from fabricpc.nodes import get_node_class_from_type
-        node_class = get_node_class_from_type(node_info.node_type)
-
-        _, state = node_class.forward(params, inputs, state, node_info)
-
-        config = node_info.node_config
-        stride = config.get("stride", (1, 1))
-        padding = config.get("padding", "SAME")
-
-        kernel = params.weights["kernel"]
-        input_grads = {}
-
-        for edge_key, x in inputs.items():
-            # Transposed convolution for gradient w.r.t. input
-            grad = jax.lax.conv_transpose(
-                state.gain_mod_error, kernel,
-                strides=stride,
-                padding=padding,
-                dimension_numbers=('NHWC', 'HWIO', 'NHWC')
-            )
-            input_grads[edge_key] = -grad
-
-        return state, input_grads
-```
+    """**Example Conv2D Node Config**:
+    {
+        "name": "conv1",
+        "shape": (26, 26, 64),  # Output shape: (H, W, C) channels-last
+        "type": "conv2d",
+        "activation": {"type": "relu"},
+        # Conv-specific config:
+        "kernel_size": (3, 3),
+        "stride": (1, 1),
+        "padding": "valid",
+        "weight_init": {"type": "he_normal"},
+    }
+    """
 
 ### 2.4 Attention Nodes
 
@@ -580,6 +530,21 @@ class TransformerBlockNode(NodeBase):
                 "ln2_beta": jnp.zeros((1, 1, embed_dim)),
             }
         )
+    """
+    **Example Transformer Block Config**:
+    {
+        "name": "transformer_block_1",
+        "shape": (128, 512),  # (seq_len, embed_dim)
+        "type": "transformer_block",
+        "activation": {"type": "gelu"},
+        # Transformer-specific config:
+        "num_heads": 8,
+        "ff_dim": 2048,
+        "dropout_rate": 0.1,
+        "pre_norm": True,
+    }
+    # The config is already passed to `initialize_params(key, node_shape, input_shapes, config)` and stored in `node_info.node_config` for access in `forward()`.
+    """
 ```
 
 ---
@@ -641,7 +606,7 @@ def ipc_inference_step(
             continue  # Skip source nodes
 
         # Get node class and gather inputs
-        node_class = get_node_class_from_type(node_info.node_type)
+        node_class = get_node_class(node_info.node_type)
         in_edges_data = gather_inputs(node_info, structure, state)
 
         # Compute forward pass and input gradients for this node
@@ -810,7 +775,7 @@ def scheduled_inference_step(
         if node_info.in_degree == 0:
             continue  # Skip source nodes
 
-        node_class = get_node_class_from_type(node_info.node_type)
+        node_class = get_node_class(node_info.node_type)
         in_edges_data = gather_inputs(node_info, structure, state)
 
         node_state, inedge_grads = node_class.forward_inference(
@@ -1069,8 +1034,8 @@ class HyperNode(NodeBase):
         Propagates gradients backward through the subgraph to get
         input gradients for the parent graph.
         """
-        from fabricpc.nodes import get_node_class_from_type
-        node_class = get_node_class_from_type(node_info.node_type)
+        from fabricpc.nodes import get_node_class
+        node_class = get_node_class(node_info.node_type)
 
         # Run forward to get updated state
         _, state = node_class.forward(params, inputs, state, node_info)
@@ -1094,7 +1059,7 @@ class HyperNode(NodeBase):
             if sub_node_info.in_degree == 0:
                 continue
 
-            sub_node_class = get_node_class_from_type(sub_node_info.node_type)
+            sub_node_class = get_node_class(sub_node_info.node_type)
             in_edges_data = gather_inputs(sub_node_info, subgraph_structure, subgraph_state)
 
             _, inedge_grads = sub_node_class.forward_inference(

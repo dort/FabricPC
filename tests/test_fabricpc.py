@@ -26,7 +26,7 @@ from fabricpc.graph.graph_net import create_pc_graph, build_graph_structure, ini
 from fabricpc.core.inference import run_inference
 from fabricpc.training import train_step, compute_local_weight_gradients
 from fabricpc.training.optimizers import create_optimizer
-from fabricpc.nodes import get_node_class_from_type
+from fabricpc.nodes import get_node_class
 
 # Set up JAX
 jax.config.update("jax_platform_name", "cpu")
@@ -334,7 +334,7 @@ class TestForwardMethods:
 
         for node_name, node_info in structure.nodes.items():
             if node_info.in_degree > 0:  # Skip source nodes
-                node_class = get_node_class_from_type(node_info.node_type)
+                node_class = get_node_class(node_info.node_type)
                 node_state = state.nodes[node_name]
 
                 # Collect edge inputs
@@ -368,7 +368,7 @@ class TestForwardMethods:
 
         for node_name, node_info in structure.nodes.items():
             if node_info.in_degree > 0:  # Skip source nodes
-                node_class = get_node_class_from_type(node_info.node_type)
+                node_class = get_node_class(node_info.node_type)
                 node_state = state.nodes[node_name]
                 node_params = params.nodes[node_name]
 

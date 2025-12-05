@@ -16,7 +16,7 @@ import jax.numpy as jnp
 from fabricpc.core.types import NodeState, NodeParams, NodeInfo, EdgeInfo, GraphStructure
 from fabricpc.graph.graph_net import create_pc_graph, initialize_state
 from fabricpc.core.inference import run_inference, gather_inputs
-from fabricpc.nodes import get_node_class_from_type, LinearNode, LinearExplicitGrad
+from fabricpc.nodes import get_node_class, LinearNode, LinearExplicitGrad
 
 jax.config.update("jax_platform_name", "cpu")  # using cuda causes larger numerical differences because of TF32 precision
 
@@ -86,7 +86,7 @@ class TestLinearAutoGradNode:
             shape=(output_dim,),
             node_type="linear",
             activation_config={"type": activation},
-            node_config={},
+            node_config={"energy": {"type": "gaussian"}},
             in_degree=1,
             out_degree=0,
             slots={},
@@ -144,7 +144,7 @@ class TestLinearAutoGradNode:
             shape=(output_dim,),
             node_type="linear",
             activation_config={"type": activation},
-            node_config={},
+            node_config={"energy": {"type": "gaussian"}},
             in_degree=1,
             out_degree=0,
             slots={},
@@ -252,7 +252,7 @@ class TestLinearAutoGradNodeRegistration:
 
     def test_node_type_registered(self):
         """Test that linear_explicit_grad node type is registered."""
-        node_class = get_node_class_from_type("linear_explicit_grad")
+        node_class = get_node_class("linear_explicit_grad")
         assert node_class is LinearExplicitGrad
 
     def test_network_creation_with_autograd_nodes(self, rng_key):

@@ -35,6 +35,21 @@ class LinearNode(FlattenInputMixin, NodeBase):
     Uses FlattenInputMixin for flatten/reshape operations.
     """
 
+    CONFIG_SCHEMA = {
+        "weight_init": {
+            "type": dict,
+            "default": {"type": "normal", "mean": 0.0, "std": 0.05},
+            "description": "Weight initialization config"
+        },
+        "use_bias": {
+            "type": bool,
+            "default": True,
+            "description": "Whether to use bias"
+        }
+    }
+
+    DEFAULT_ENERGY_CONFIG = {"type": "gaussian"}
+
     @staticmethod
     def get_slots() -> Dict[str, SlotSpec]:
         """
@@ -130,8 +145,8 @@ class LinearNode(FlattenInputMixin, NodeBase):
                 - total_energy: scalar energy value for this node
                 - NodeState: updated node state (z_mu, pre_activation, etc.)
         """
-        from fabricpc.nodes import get_node_class_from_type
-        node_class = get_node_class_from_type(node_info.node_type)
+        from fabricpc.nodes import get_node_class
+        node_class = get_node_class(node_info.node_type)
 
         # Get batch size and output shape
         batch_size = state.z_latent.shape[0]
@@ -216,8 +231,8 @@ class LinearExplicitGrad(LinearNode):
                 - NodeState: updated node state (z_mu, pre_activation, etc.)
                 - gradient_wrt_inputs: dictionary of gradients w.r.t. each input edge
         """
-        from fabricpc.nodes import get_node_class_from_type
-        node_class = get_node_class_from_type(node_info.node_type)
+        from fabricpc.nodes import get_node_class
+        node_class = get_node_class(node_info.node_type)
 
         # Forward pass to get new state
         _, state = node_class.forward(params, inputs, state, node_info)
@@ -277,8 +292,8 @@ class LinearExplicitGrad(LinearNode):
                 - NodeState: updated node state (z_mu, pre_activation, etc.)
                 - params_grad: NodeParams containing weight and bias gradients
         """
-        from fabricpc.nodes import get_node_class_from_type
-        node_class = get_node_class_from_type(node_info.node_type)
+        from fabricpc.nodes import get_node_class
+        node_class = get_node_class(node_info.node_type)
 
         # Forward pass to get new state
         _, state = node_class.forward(params, inputs, state, node_info)
