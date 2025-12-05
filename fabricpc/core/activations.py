@@ -1,87 +1,352 @@
 """
 Activation functions for predictive coding networks in JAX.
 
+This module provides:
+- ActivationBase abstract class with schema validation
+- Built-in activations (identity, sigmoid, tanh, relu, leaky_relu, hard_tanh)
+- Registry with decorator-based registration for custom activations
+- Entry point discovery for external packages
+
 All functions are pure and compatible with JAX transformations (jit, vmap, grad).
 """
 
-from typing import Callable, Tuple, Dict, Any
+from abc import ABC, abstractmethod
+from typing import Callable, Tuple, Dict, Any, Type, List
 import jax.numpy as jnp
 from jax import nn
 
-
-def sigmoid(x: jnp.ndarray) -> jnp.ndarray:
-    """Sigmoid activation: σ(x) = 1 / (1 + exp(-x))"""
-    return nn.sigmoid(x)
+from fabricpc.core.registry import Registry, RegistrationError, validate_config_schema
 
 
-def sigmoid_deriv(x: jnp.ndarray) -> jnp.ndarray:
-    """Derivative of sigmoid: σ'(x) = σ(x) * (1 - σ(x))"""
-    s = nn.sigmoid(x)
-    return s * (1 - s)
+# =============================================================================
+# Activation Base Class
+# =============================================================================
+
+class ActivationBase(ABC):
+    """
+    Abstract base class for activation functions.
+
+    Activation functions define how pre-activation values are transformed.
+    Each activation provides both the forward function and its derivative.
+
+    All methods are static for JAX compatibility (pure functions, no state).
+
+    Required methods:
+        - forward(): Apply activation function
+        - derivative(): Compute derivative w.r.t. pre-activation
+
+    Required attributes:
+        - CONFIG_SCHEMA: dict specifying configuration validation
+
+    Example implementation:
+        @register_activation("my_activation")
+        class MyActivation(ActivationBase):
+            CONFIG_SCHEMA = {
+                "temperature": {"type": float, "default": 1.0}
+            }
+
+            @staticmethod
+            def forward(x, config=None):
+                temp = config.get("temperature", 1.0) if config else 1.0
+                return jnp.tanh(x / temp)
+
+            @staticmethod
+            def derivative(x, config=None):
+                temp = config.get("temperature", 1.0) if config else 1.0
+                t = jnp.tanh(x / temp)
+                return (1 - t**2) / temp
+    """
+
+    # CONFIG_SCHEMA is required - subclasses must define it
+    # Use empty dict {} if no additional config parameters are needed
+    CONFIG_SCHEMA: Dict[str, Dict[str, Any]]
+
+    @staticmethod
+    @abstractmethod
+    def forward(x: jnp.ndarray, config: Dict[str, Any] = None) -> jnp.ndarray:
+        """
+        Apply activation function.
+
+        Args:
+            x: Pre-activation values, any shape
+            config: Optional configuration dict for activation parameters
+
+        Returns:
+            Activated values, same shape as x
+        """
+        pass
+
+    @staticmethod
+    @abstractmethod
+    def derivative(x: jnp.ndarray, config: Dict[str, Any] = None) -> jnp.ndarray:
+        """
+        Compute derivative w.r.t. pre-activation.
+
+        Args:
+            x: Pre-activation values, any shape
+            config: Optional configuration dict for activation parameters
+
+        Returns:
+            Derivative values, same shape as x
+
+        Note:
+            This is the derivative f'(x) evaluated at x, where f is the activation.
+            Used in predictive coding for gain modulation.
+        """
+        pass
 
 
-def relu(x: jnp.ndarray) -> jnp.ndarray:
-    """ReLU activation: max(0, x)"""
-    return nn.relu(x)
+# =============================================================================
+# Activation Registry
+# =============================================================================
+
+class ActivationRegistrationError(RegistrationError):
+    """Raised when activation registration fails."""
+    pass
 
 
-def relu_deriv(x: jnp.ndarray) -> jnp.ndarray:
-    """Derivative of ReLU: 1 if x > 0, else 0"""
-    return (x > 0).astype(jnp.float32)
+# Create the activation registry instance
+_activation_registry = Registry(
+    name="activation",
+    entry_point_group="fabricpc.activations",
+    required_attrs=["CONFIG_SCHEMA"],
+    required_methods=["forward", "derivative"],
+    attr_validators={
+        "CONFIG_SCHEMA": validate_config_schema,
+    }
+)
+_activation_registry.set_error_class(ActivationRegistrationError)
 
 
-def tanh(x: jnp.ndarray) -> jnp.ndarray:
-    """Tanh activation: (exp(x) - exp(-x)) / (exp(x) + exp(-x))"""
-    return jnp.tanh(x)
+def register_activation(activation_type: str):
+    """
+    Decorator to register an activation function with the registry.
+
+    Usage:
+        @register_activation("softplus")
+        class SoftplusActivation(ActivationBase):
+            ...
+
+    Args:
+        activation_type: Unique identifier for this activation type (case-insensitive)
+
+    Returns:
+        Decorator function
+
+    Raises:
+        ActivationRegistrationError: If registration fails
+    """
+    return _activation_registry.register(activation_type)
 
 
-def tanh_deriv(x: jnp.ndarray) -> jnp.ndarray:
-    """Derivative of tanh: 1 - tanh²(x)"""
-    t = jnp.tanh(x)
-    return 1 - t**2
+def get_activation_class(activation_type: str) -> Type[ActivationBase]:
+    """
+    Get an activation class by its registered type name.
+
+    Args:
+        activation_type: The registered activation type (case-insensitive)
+
+    Returns:
+        The activation class
+
+    Raises:
+        ValueError: If activation type is not registered
+    """
+    return _activation_registry.get(activation_type)
 
 
-def identity(x: jnp.ndarray) -> jnp.ndarray:
+def list_activation_types() -> List[str]:
+    """Return list of all registered activation types."""
+    return _activation_registry.list_types()
+
+
+def unregister_activation(activation_type: str) -> None:
+    """
+    Remove an activation type from the registry.
+    Primarily for testing purposes.
+
+    Args:
+        activation_type: The activation type to unregister (case-insensitive)
+    """
+    _activation_registry.unregister(activation_type)
+
+
+def clear_activation_registry() -> None:
+    """Clear all registrations. For testing only."""
+    _activation_registry.clear()
+
+
+def validate_activation_config(
+    activation_class: Type[ActivationBase],
+    config: Dict[str, Any]
+) -> Dict[str, Any]:
+    """
+    Validate and apply defaults from activation's CONFIG_SCHEMA.
+
+    Args:
+        activation_class: The activation class with CONFIG_SCHEMA
+        config: The user-provided config dict
+
+    Returns:
+        Config dict with defaults applied
+
+    Raises:
+        ConfigValidationError: If required fields are missing or validation fails
+    """
+    from fabricpc.core.config import validate_config
+
+    schema = getattr(activation_class, 'CONFIG_SCHEMA', None)
+    activation_type = config.get("type", "unknown") if config else "unknown"
+    return validate_config(schema, config, context=f"activation '{activation_type}'")
+
+
+def discover_external_activations() -> None:
+    """
+    Discover and register activations from installed packages via entry points.
+
+    Looks for packages with entry points in the "fabricpc.activations" group.
+    Each entry point should map an activation type name to an ActivationBase subclass.
+
+    Example pyproject.toml for an external package:
+        [project.entry-points."fabricpc.activations"]
+        swish = "my_package.activations:SwishActivation"
+    """
+    _activation_registry.discover_external()
+
+
+# =============================================================================
+# Built-in Activations
+# =============================================================================
+
+@register_activation("identity")
+class IdentityActivation(ActivationBase):
     """Identity activation: f(x) = x"""
-    return x
+
+    CONFIG_SCHEMA = {}
+
+    @staticmethod
+    def forward(x: jnp.ndarray, config: Dict[str, Any] = None) -> jnp.ndarray:
+        return x
+
+    @staticmethod
+    def derivative(x: jnp.ndarray, config: Dict[str, Any] = None) -> jnp.ndarray:
+        return jnp.ones_like(x)
 
 
-def identity_deriv(x: jnp.ndarray) -> jnp.ndarray:
-    """Derivative of identity: always 1"""
-    return jnp.ones_like(x)
+@register_activation("sigmoid")
+class SigmoidActivation(ActivationBase):
+    """Sigmoid activation: σ(x) = 1 / (1 + exp(-x))"""
+
+    CONFIG_SCHEMA = {}
+
+    @staticmethod
+    def forward(x: jnp.ndarray, config: Dict[str, Any] = None) -> jnp.ndarray:
+        return nn.sigmoid(x)
+
+    @staticmethod
+    def derivative(x: jnp.ndarray, config: Dict[str, Any] = None) -> jnp.ndarray:
+        s = nn.sigmoid(x)
+        return s * (1 - s)
 
 
-def leaky_relu(x: jnp.ndarray, alpha: float = 0.01) -> jnp.ndarray:
-    """Leaky ReLU: max(alpha * x, x)"""
-    return jnp.where(x > 0, x, alpha * x)
+@register_activation("tanh")
+class TanhActivation(ActivationBase):
+    """Tanh activation: (exp(x) - exp(-x)) / (exp(x) + exp(-x))"""
+
+    CONFIG_SCHEMA = {}
+
+    @staticmethod
+    def forward(x: jnp.ndarray, config: Dict[str, Any] = None) -> jnp.ndarray:
+        return jnp.tanh(x)
+
+    @staticmethod
+    def derivative(x: jnp.ndarray, config: Dict[str, Any] = None) -> jnp.ndarray:
+        t = jnp.tanh(x)
+        return 1 - t**2
 
 
-def leaky_relu_deriv(x: jnp.ndarray, alpha: float = 0.01) -> jnp.ndarray:
-    """Derivative of Leaky ReLU"""
-    return jnp.where(x > 0, 1.0, alpha)
+@register_activation("relu")
+class ReLUActivation(ActivationBase):
+    """ReLU activation: max(0, x)"""
+
+    CONFIG_SCHEMA = {}
+
+    @staticmethod
+    def forward(x: jnp.ndarray, config: Dict[str, Any] = None) -> jnp.ndarray:
+        return nn.relu(x)
+
+    @staticmethod
+    def derivative(x: jnp.ndarray, config: Dict[str, Any] = None) -> jnp.ndarray:
+        return (x > 0).astype(jnp.float32)
 
 
-def hard_tanh(x: jnp.ndarray, min_val: float = -1.0, max_val: float = 1.0) -> jnp.ndarray:
-    """Hard tanh: clip(x, min_val, max_val)"""
-    return jnp.clip(x, min_val, max_val)
+@register_activation("leaky_relu")
+class LeakyReLUActivation(ActivationBase):
+    """
+    Leaky ReLU activation: max(alpha * x, x)
+
+    Config options:
+        - alpha: Negative slope (default: 0.01)
+    """
+
+    CONFIG_SCHEMA = {
+        "alpha": {
+            "type": (int, float),
+            "default": 0.01,
+            "description": "Negative slope for x < 0"
+        }
+    }
+
+    @staticmethod
+    def forward(x: jnp.ndarray, config: Dict[str, Any] = None) -> jnp.ndarray:
+        alpha = config.get("alpha", 0.01) if config else 0.01
+        return jnp.where(x > 0, x, alpha * x)
+
+    @staticmethod
+    def derivative(x: jnp.ndarray, config: Dict[str, Any] = None) -> jnp.ndarray:
+        alpha = config.get("alpha", 0.01) if config else 0.01
+        return jnp.where(x > 0, 1.0, alpha)
 
 
-def hard_tanh_deriv(x: jnp.ndarray, min_val: float = -1.0, max_val: float = 1.0) -> jnp.ndarray:
-    """Derivative of hard tanh: 1 if min_val < x < max_val, else 0"""
-    return ((x > min_val) & (x < max_val)).astype(jnp.float32)
+@register_activation("hard_tanh")
+class HardTanhActivation(ActivationBase):
+    """
+    Hard tanh activation: clip(x, min_val, max_val)
+
+    Config options:
+        - min_val: Minimum output value (default: -1.0)
+        - max_val: Maximum output value (default: 1.0)
+    """
+
+    CONFIG_SCHEMA = {
+        "min_val": {
+            "type": (int, float),
+            "default": -1.0,
+            "description": "Minimum output value"
+        },
+        "max_val": {
+            "type": (int, float),
+            "default": 1.0,
+            "description": "Maximum output value"
+        }
+    }
+
+    @staticmethod
+    def forward(x: jnp.ndarray, config: Dict[str, Any] = None) -> jnp.ndarray:
+        min_val = config.get("min_val", -1.0) if config else -1.0
+        max_val = config.get("max_val", 1.0) if config else 1.0
+        return jnp.clip(x, min_val, max_val)
+
+    @staticmethod
+    def derivative(x: jnp.ndarray, config: Dict[str, Any] = None) -> jnp.ndarray:
+        min_val = config.get("min_val", -1.0) if config else -1.0
+        max_val = config.get("max_val", 1.0) if config else 1.0
+        return ((x > min_val) & (x < max_val)).astype(jnp.float32)
 
 
-# Activation function registry
-# Matches PyTorch activation names: identity, sigmoid, tanh, relu, leaky_relu, hard_tanh
-ACTIVATIONS: Dict[str, Tuple[Callable, Callable]] = {
-    "identity": (identity, identity_deriv),
-    "sigmoid": (sigmoid, sigmoid_deriv),
-    "tanh": (tanh, tanh_deriv),
-    "relu": (relu, relu_deriv),
-    "leaky_relu": (leaky_relu, leaky_relu_deriv),
-    "hard_tanh": (hard_tanh, hard_tanh_deriv),
-}
-
+# =============================================================================
+# Convenience Functions
+# =============================================================================
 
 def get_activation(config: Dict[str, Any]) -> Tuple[Callable, Callable]:
     """
@@ -103,29 +368,29 @@ def get_activation(config: Dict[str, Any]) -> Tuple[Callable, Callable]:
         >>> act_fn(x)
         DeviceArray([0.5, 0.731, 0.269], dtype=float32)
     """
+    from fabricpc.core.config import transform_shorthand
+
+    # Handle shorthand
+    if isinstance(config, str):
+        config = {"type": config}
+
     if "type" not in config:
         raise ValueError("config['type'] is required")
 
     act_type = config["type"].lower()
+    act_class = get_activation_class(act_type)
 
-    if act_type not in ACTIVATIONS:
-        raise ValueError(
-            f"Unknown activation type: '{act_type}'. "
-            f"Supported: {list(ACTIVATIONS.keys())}"
-        )
+    # Validate and apply defaults
+    validated_config = validate_activation_config(act_class, config)
 
-    base_fn, base_deriv = ACTIVATIONS[act_type]
+    # Return closures that capture the validated config
+    def forward_fn(x):
+        return act_class.forward(x, validated_config)
 
-    # Handle parameterized activations
-    if act_type == "leaky_relu":
-        alpha = config.get("alpha", 0.01)
-        return (lambda x: base_fn(x, alpha), lambda x: base_deriv(x, alpha))
-    elif act_type == "hard_tanh":
-        min_val = config.get("min_val", -1.0)
-        max_val = config.get("max_val", 1.0)
-        return (lambda x: base_fn(x, min_val, max_val), lambda x: base_deriv(x, min_val, max_val))
-    else:
-        return (base_fn, base_deriv)
+    def derivative_fn(x):
+        return act_class.derivative(x, validated_config)
+
+    return (forward_fn, derivative_fn)
 
 
 def get_activation_fn(config: Dict[str, Any]) -> Callable:
@@ -136,3 +401,7 @@ def get_activation_fn(config: Dict[str, Any]) -> Callable:
 def get_activation_deriv(config: Dict[str, Any]) -> Callable:
     """Get just the activation derivative function."""
     return get_activation(config)[1]
+
+
+# Auto-discover external activations on import
+discover_external_activations()

@@ -102,6 +102,22 @@ class CrossEntropyEnergy(EnergyFunctional):
     """Cross-entropy energy for multi-class outputs."""
 ```
 
+### 1.4 Graph construction system
+
+Refactor graph construction with unified registry, config validation, and node-level delegation.
+
+- [x] Establish a unified registry and schema validation pattern 
+- [x] Delegate node construction from graph builder to node classes
+- [x] Make all configurable objects (nodes, energy, activations) follow the same extensibility pattern
+- [x] Define schemas at all levels: graph, node, subnode (energy, activation, slots)
+
+Architectural advantages:
+  - Separation of concerns: Node classes now handle their own construction
+  - Extensibility: Custom node types can override from_config(), _build_slots(), or the resolve methods
+  - Cleaner code: build_graph_structure() is now focused on graph-level concerns
+  - Consistent pattern: All configurable objects (nodes, energy, activations) follow the same pattern with CONFIG_SCHEMA and validation delegation
+
+
 ## Phase 2: Core Node Types
 
 ### 2.1 Normalization Nodes

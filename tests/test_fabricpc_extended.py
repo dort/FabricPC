@@ -18,6 +18,7 @@ import jax.numpy as jnp
 from hypothesis import given, strategies as st, settings
 
 from fabricpc.core.types import NodeState, GraphState
+from fabricpc.core.config import ConfigValidationError
 from fabricpc.graph.graph_net import create_pc_graph, build_graph_structure, initialize_state
 from fabricpc.core.inference import run_inference
 

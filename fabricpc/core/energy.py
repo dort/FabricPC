@@ -50,10 +50,10 @@ If no energy config is specified, defaults to "gaussian".
 
 from abc import ABC, abstractmethod
 from typing import Dict, Any, Type, List, Tuple
-import sys
-import warnings
 
 import jax.numpy as jnp
+
+from fabricpc.core.registry import Registry, RegistrationError, validate_config_schema
 
 
 # =============================================================================
@@ -152,53 +152,25 @@ class EnergyFunctional(ABC):
 # Energy Registry
 # =============================================================================
 
-_ENERGY_REGISTRY: Dict[str, Type[EnergyFunctional]] = {}
-
-
-class EnergyRegistrationError(Exception):
+class EnergyRegistrationError(RegistrationError):
     """Raised when energy functional registration fails."""
     pass
 
 
-def _validate_energy_class(energy_class: Type[EnergyFunctional], energy_type: str) -> None:
-    """
-    Validate that an energy class implements the required interface.
+# Create the energy registry instance
+_energy_registry = Registry(
+    name="energy",
+    entry_point_group="fabricpc.energy",
+    required_attrs=["CONFIG_SCHEMA"],
+    required_methods=["energy", "grad_latent"],
+    attr_validators={
+        "CONFIG_SCHEMA": validate_config_schema,
+    }
+)
+_energy_registry.set_error_class(EnergyRegistrationError)
 
-    Args:
-        energy_class: The energy class to validate
-        energy_type: The type name being registered (for error messages)
-
-    Raises:
-        EnergyRegistrationError: If required methods/attributes are missing or abstract
-    """
-    # Check for required CONFIG_SCHEMA attribute
-    if not hasattr(energy_class, 'CONFIG_SCHEMA'):
-        raise EnergyRegistrationError(
-            f"Energy type '{energy_type}': missing required CONFIG_SCHEMA attribute. "
-            f"Use empty dict {{}} if no additional config parameters are needed."
-        )
-
-    # Validate CONFIG_SCHEMA is a dict
-    if not isinstance(energy_class.CONFIG_SCHEMA, dict):
-        raise EnergyRegistrationError(
-            f"Energy type '{energy_type}': CONFIG_SCHEMA must be a dict, "
-            f"got {type(energy_class.CONFIG_SCHEMA).__name__}"
-        )
-
-    # Check for required methods
-    required_methods = ['energy', 'grad_latent']
-
-    for method_name in required_methods:
-        method = getattr(energy_class, method_name, None)
-        if method is None:
-            raise EnergyRegistrationError(
-                f"Energy type '{energy_type}': missing required method '{method_name}'"
-            )
-        # Check it's not still abstract
-        if getattr(method, '__isabstractmethod__', False):
-            raise EnergyRegistrationError(
-                f"Energy type '{energy_type}': method '{method_name}' is abstract"
-            )
+# Expose the internal registry dict for backward compatibility
+_ENERGY_REGISTRY = _energy_registry._registry
 
 
 def register_energy(energy_type: str):
@@ -219,31 +191,7 @@ def register_energy(energy_type: str):
     Raises:
         EnergyRegistrationError: If registration fails (duplicate, missing methods)
     """
-    def decorator(energy_class: Type[EnergyFunctional]) -> Type[EnergyFunctional]:
-        type_lower = energy_type.lower()
-
-        # Check for duplicate registration
-        if type_lower in _ENERGY_REGISTRY:
-            existing = _ENERGY_REGISTRY[type_lower]
-            if existing is not energy_class:
-                raise EnergyRegistrationError(
-                    f"Energy type '{energy_type}' already registered by {existing.__name__}"
-                )
-            # Same class registered twice - silently allow (import idempotency)
-            return energy_class
-
-        # Validate interface
-        _validate_energy_class(energy_class, energy_type)
-
-        # Register
-        _ENERGY_REGISTRY[type_lower] = energy_class
-
-        # Store the registered name on the class for introspection
-        energy_class._registered_type = type_lower
-
-        return energy_class
-
-    return decorator
+    return _energy_registry.register(energy_type)
 
 
 def get_energy_class(energy_type: str) -> Type[EnergyFunctional]:
@@ -259,19 +207,12 @@ def get_energy_class(energy_type: str) -> Type[EnergyFunctional]:
     Raises:
         ValueError: If energy type is not registered
     """
-    type_lower = energy_type.lower()
-    if type_lower not in _ENERGY_REGISTRY:
-        available = list(_ENERGY_REGISTRY.keys())
-        raise ValueError(
-            f"Unknown energy type '{energy_type}'. "
-            f"Available types: {available}"
-        )
-    return _ENERGY_REGISTRY[type_lower]
+    return _energy_registry.get(energy_type)
 
 
 def list_energy_types() -> List[str]:
     """Return list of all registered energy types."""
-    return sorted(_ENERGY_REGISTRY.keys())
+    return _energy_registry.list_types()
 
 
 def unregister_energy(energy_type: str) -> None:
@@ -282,14 +223,12 @@ def unregister_energy(energy_type: str) -> None:
     Args:
         energy_type: The energy type to unregister (case-insensitive)
     """
-    type_lower = energy_type.lower()
-    if type_lower in _ENERGY_REGISTRY:
-        del _ENERGY_REGISTRY[type_lower]
+    _energy_registry.unregister(energy_type)
 
 
 def clear_energy_registry() -> None:
     """Clear all registrations. For testing only."""
-    _ENERGY_REGISTRY.clear()
+    _energy_registry.clear()
 
 
 def validate_energy_config(
@@ -299,18 +238,6 @@ def validate_energy_config(
     """
     Validate and apply defaults from energy's CONFIG_SCHEMA.
 
-    Energy functionals can define a CONFIG_SCHEMA class attribute to specify:
-    - Required fields
-    - Type validation
-    - Choice validation
-    - Default values
-
-    Example CONFIG_SCHEMA:
-        CONFIG_SCHEMA = {
-            "temperature": {"type": float, "default": 1.0},
-            "reduction": {"type": str, "default": "sum", "choices": ["sum", "mean"]},
-        }
-
     Args:
         energy_class: The energy class with CONFIG_SCHEMA
         config: The user-provided config dict
@@ -319,44 +246,13 @@ def validate_energy_config(
         Config dict with defaults applied
 
     Raises:
-        ValueError: If required fields are missing or validation fails
+        ConfigValidationError: If required fields are missing or validation fails
     """
+    from fabricpc.core.config import validate_config
+
     schema = getattr(energy_class, 'CONFIG_SCHEMA', None)
-    if schema is None:
-        return config or {}
-
-    result = dict(config) if config else {}
-
-    for field_name, field_spec in schema.items():
-        if field_name in result:
-            # Validate type if specified
-            expected_type = field_spec.get('type')
-            if expected_type and not isinstance(result[field_name], expected_type):
-                # Handle tuple of types for error message
-                if isinstance(expected_type, tuple):
-                    type_names = " or ".join(t.__name__ for t in expected_type)
-                else:
-                    type_names = expected_type.__name__
-                raise ValueError(
-                    f"Energy config '{field_name}' must be {type_names}, "
-                    f"got {type(result[field_name]).__name__}"
-                )
-            # Validate choices if specified
-            choices = field_spec.get('choices')
-            if choices and result[field_name] not in choices:
-                raise ValueError(
-                    f"Energy config '{field_name}' must be one of {choices}, "
-                    f"got '{result[field_name]}'"
-                )
-        elif field_spec.get('required', False):
-            raise ValueError(
-                f"Required energy config '{field_name}' missing. "
-                f"Description: {field_spec.get('description', 'no description')}"
-            )
-        elif 'default' in field_spec:
-            result[field_name] = field_spec['default']
-
-    return result
+    energy_type = config.get("type", "unknown") if config else "unknown"
+    return validate_config(schema, config, context=f"energy '{energy_type}'")
 
 
 def discover_external_energy() -> None:
@@ -370,40 +266,7 @@ def discover_external_energy() -> None:
         [project.entry-points."fabricpc.energy"]
         poisson = "my_package.energy:PoissonEnergy"
     """
-    try:
-        if sys.version_info >= (3, 10):
-            from importlib.metadata import entry_points
-            eps = entry_points(group="fabricpc.energy")
-        else:
-            from importlib.metadata import entry_points
-            all_eps = entry_points()
-            eps = all_eps.get("fabricpc.energy", [])
-
-        for ep in eps:
-            try:
-                energy_class = ep.load()
-                type_name = ep.name.lower()
-
-                # Skip if already registered (built-in takes precedence)
-                if type_name in _ENERGY_REGISTRY:
-                    continue
-
-                # Validate and register
-                _validate_energy_class(energy_class, type_name)
-                _ENERGY_REGISTRY[type_name] = energy_class
-                energy_class._registered_type = type_name
-
-            except Exception as e:
-                warnings.warn(
-                    f"Failed to load energy '{ep.name}' from {ep.value}: {e}",
-                    RuntimeWarning
-                )
-    except Exception as e:
-        # Entry point discovery failed entirely - not critical
-        warnings.warn(
-            f"Energy entry point discovery failed: {e}",
-            RuntimeWarning
-        )
+    _energy_registry.discover_external()
 
 
 # =============================================================================

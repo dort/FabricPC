@@ -11,7 +11,7 @@ from typing import Dict, Any, Tuple
 import jax
 import jax.numpy as jnp
 from dataclasses import dataclass
-from fabricpc.core.types import NodeParams, NodeState, NodeInfo
+from fabricpc.core.types import NodeParams, NodeState, NodeInfo, SlotInfo, EdgeInfo
 
 
 @dataclass(frozen=True)
@@ -133,6 +133,13 @@ class NodeBase(ABC):
             ...
     """
 
+    # Base config schema for all nodes - defines required fields
+    BASE_CONFIG_SCHEMA: Dict[str, Any] = {
+        "name": {"type": str, "required": True, "description": "Node name"},
+        "shape": {"type": tuple, "required": True, "description": "Output shape"},
+        "type": {"type": str, "required": True, "description": "Node type"},
+    }
+
     # CONFIG_SCHEMA is required - subclasses must define it
     # Use empty dict {} if no additional config parameters are needed
     CONFIG_SCHEMA: Dict[str, Any]
@@ -140,6 +147,9 @@ class NodeBase(ABC):
     # DEFAULT_ENERGY_CONFIG - Can be overridden by default in subclass and per-node via node_config["energy"]
     DEFAULT_ENERGY_CONFIG: Dict[str, Any] = {"type": "gaussian"}
 
+    # Default activation config - can be overridden by subclass or per-node via node_config["activation"]
+    DEFAULT_ACTIVATION_CONFIG: Dict[str, Any] = {"type": "identity"}
+    
     @staticmethod
     @abstractmethod
     def get_slots() -> Dict[str, SlotSpec]:
@@ -346,3 +356,165 @@ class NodeBase(ABC):
         """
         from fabricpc.core.energy import get_energy_class
         return get_energy_class(energy_name)
+
+    @classmethod
+    def from_config(
+        cls,
+        node_config: Dict[str, Any],
+        in_edges: Dict[str, EdgeInfo],
+        out_edges: Dict[str, EdgeInfo],
+    ) -> NodeInfo:
+        """
+        Validate config and construct node components.
+
+        This method centralizes node construction logic, delegating subnode
+        construction (slots, energy, activation) to the object's class.
+
+        Args:
+            node_config: Raw node configuration dictionary
+            in_edges: Dictionary of incoming edges (edge_key -> EdgeInfo)
+            out_edges: Dictionary of outgoing edges (edge_key -> EdgeInfo)
+
+        Returns:
+            NodeInfo object with validated config and constructed components
+
+        Raises:
+            ValueError: If slot constraints are violated
+            ConfigValidationError: If config validation fails
+        """
+        from fabricpc.nodes.registry import validate_node_config
+
+        # 1. Validate node-specific config against CONFIG_SCHEMA
+        validated_config = validate_node_config(cls, node_config)
+
+        node_name = validated_config["name"]
+
+        # 2. Build and validate slots
+        slots = cls._build_slots(node_name, in_edges)
+
+        # 3. Resolve energy config (user override or class default)
+        validated_config["energy"] = cls._resolve_energy_config(node_config)
+
+        # 4. Resolve activation config (user override or class default)
+        validated_config["activation"] = cls._resolve_activation_config(node_config)
+
+        # Construct the node object with validated config (includes defaults)
+        return NodeInfo(
+            name=node_name,
+            shape=tuple(validated_config["shape"]),
+            node_type=validated_config["type"],
+            node_config=validated_config,
+            slots=slots,
+            in_degree=len(in_edges),
+            out_degree=len(out_edges),
+            in_edges=tuple(in_edges.keys()),
+            out_edges=tuple(out_edges.keys()),
+        )
+
+    @classmethod
+    def _build_slots(
+        cls,
+        node_name: str,
+        in_edges: Dict[str, EdgeInfo]
+    ) -> Dict[str, SlotInfo]:
+        """
+        Build SlotInfo objects from slot specs and incoming edges.
+
+        Args:
+            node_name: Name of this node
+            in_edges: Dictionary of incoming edges (edge_key -> EdgeInfo)
+
+        Returns:
+            Dictionary mapping slot names to SlotInfo objects
+
+        Raises:
+            ValueError: If slot constraints are violated (e.g., multiple inputs to single-input slot)
+        """
+        slot_specs = cls.get_slots()
+        slots = {}
+
+        for slot_name, slot_spec in slot_specs.items():
+            # Find node names that are in-neighbors to this slot
+            in_neighbors = [
+                edge.source for edge in in_edges.values()
+                if edge.slot == slot_name
+            ]
+
+            # Validate constraints
+            if not slot_spec.is_multi_input and len(in_neighbors) > 1:
+                raise ValueError(
+                    f"Slot '{slot_name}' in node '{node_name}' is single-input "
+                    f"but has {len(in_neighbors)} connections"
+                )
+
+            slots[slot_name] = SlotInfo(
+                name=slot_name,
+                parent_node=node_name,
+                is_multi_input=slot_spec.is_multi_input,
+                in_neighbors=tuple(in_neighbors)
+            )
+
+        # Validate that all incoming edges connect to valid slots
+        for edge_key, edge in in_edges.items():
+            if edge.slot not in slots:
+                raise ValueError(
+                    f"Edge '{edge_key}' connects to non-existent slot '{edge.slot}' "
+                    f"in node '{node_name}'. Available slots: {list(slots.keys())}"
+                )
+
+        return slots
+
+    @classmethod
+    def _resolve_energy_config(cls, node_config: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Resolve energy config with validation.
+
+        Uses node_config["energy"] if specified, otherwise falls back to
+        cls.DEFAULT_ENERGY_CONFIG. Validates against energy class CONFIG_SCHEMA.
+
+        Args:
+            node_config: Node configuration dictionary
+
+        Returns:
+            Validated energy config dict
+        """
+        from fabricpc.core.config import transform_shorthand
+        from fabricpc.core.energy import get_energy_class, validate_energy_config
+
+        energy_config = node_config.get("energy")
+
+        if energy_config is None:
+            energy_config = cls.DEFAULT_ENERGY_CONFIG.copy()
+        elif isinstance(energy_config, str):
+            energy_config = {"type": energy_config}
+
+        energy_type = energy_config.get("type", "gaussian")
+        energy_class = get_energy_class(energy_type)
+        return validate_energy_config(energy_class, energy_config)
+
+    @classmethod
+    def _resolve_activation_config(cls, node_config: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Resolve activation config with validation.
+
+        Uses node_config["activation"] if specified, otherwise falls back to
+        cls.DEFAULT_ACTIVATION_CONFIG. Validates against activation class CONFIG_SCHEMA.
+
+        Args:
+            node_config: Node configuration dictionary
+
+        Returns:
+            Validated activation config dict
+        """
+        from fabricpc.core.activations import get_activation_class, validate_activation_config
+
+        act_config = node_config.get("activation")
+
+        if act_config is None:
+            act_config = cls.DEFAULT_ACTIVATION_CONFIG.copy()
+        elif isinstance(act_config, str):
+            act_config = {"type": act_config}
+
+        act_type = act_config.get("type", "identity")
+        act_class = get_activation_class(act_type)
+        return validate_activation_config(act_class, act_config)

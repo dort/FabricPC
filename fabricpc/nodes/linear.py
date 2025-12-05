@@ -169,7 +169,7 @@ class LinearNode(FlattenInputMixin, NodeBase):
                 pre_activation = pre_activation + params.biases["b"]
 
             # Apply activation function
-            activation_fn, activation_deriv = get_activation(node_info.activation_config)
+            activation_fn, activation_deriv = get_activation(node_info.node_config["activation"])
             z_mu = activation_fn(pre_activation)
 
             # Error
@@ -239,7 +239,7 @@ class LinearExplicitGrad(LinearNode):
         # Note: the self-latent gradient is accumulated in state.latent_grad by the forward method
 
         # Determine the energy functional to use for the node from its config
-        energy_functional = "gaussian"  # TODO make configurable per node, node_info.config.get("energy_functional", "gaussian")
+        energy_functional = node_info.node_config.get("energy", {}).get("type", None)
         latent_is_preactivation = node_info.node_config.get("latent_type") == "preactivation"
         input_grads = {}
 
@@ -251,7 +251,7 @@ class LinearExplicitGrad(LinearNode):
 
             if energy_functional == "gaussian":
                 if latent_is_preactivation:
-                    raise NotImplementedError("pre-activation latent type not implemented for LinearNode with Gaussian energy.")
+                    raise NotImplementedError("pre-activation latent type not implemented for LinearExplicitGrad with Gaussian energy.")
                     grad_contribution = -jnp.matmul(state.error, params.weights[edge_key].T)
                     # error (batch, dim_tgt)
                     # weights{s->t} (dim_src, dim_tgt)
@@ -261,7 +261,7 @@ class LinearExplicitGrad(LinearNode):
                     grad_flat = -jnp.matmul(gain_mod_error_flat, params.weights[edge_key].T)
                     grad_contribution = FlattenInputMixin.reshape_output(grad_flat, source_shape)
             else:
-                raise NotImplementedError(f"energy functional '{energy_functional}' not implemented in LinearNode.")
+                raise NotImplementedError(f"energy functional '{energy_functional}' not implemented in LinearExplicitGrad.")
 
             input_grads[edge_key] = grad_contribution
 

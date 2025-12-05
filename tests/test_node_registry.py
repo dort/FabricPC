@@ -22,7 +22,6 @@ from fabricpc.nodes.registry import (
     validate_node_config,
     discover_external_nodes,
     NodeRegistrationError,
-    _NODE_REGISTRY,
 )
 from fabricpc.nodes import (
     LinearNode,
@@ -229,7 +228,7 @@ class TestConfigValidation:
 
     def test_schema_applies_defaults(self):
         """Test that LinearNode's CONFIG_SCHEMA applies defaults."""
-        config = {"name": "test", "shape": (10,), "custom_field": "value"}
+        config = {"name": "test", "shape": (10,), "type": "linear", "custom_field": "value"}
         result = validate_node_config(LinearNode, config)
         # Original fields preserved
         assert result["name"] == "test"
@@ -257,14 +256,14 @@ class TestConfigValidation:
             def forward(params, inputs, state, node_info):
                 return jnp.array(0.0), state
 
-        config = {"name": "test", "shape": (10,)}  # missing kernel_size
-        with pytest.raises(ValueError) as exc_info:
+        from fabricpc.core.config import ConfigValidationError
+        config = {"name": "test", "shape": (10,), "type": "custom"}  # missing kernel_size
+        with pytest.raises(ConfigValidationError) as exc_info:
             validate_node_config(NodeWithSchema, config)
         assert "kernel_size" in str(exc_info.value)
-        assert "Required" in str(exc_info.value)
 
     def test_type_mismatch_raises(self):
-        """Test that wrong type raises ValueError."""
+        """Test that wrong type raises ConfigValidationError."""
         class NodeWithSchema(NodeBase):
             CONFIG_SCHEMA = {
                 "stride": {"type": tuple},
@@ -282,8 +281,9 @@ class TestConfigValidation:
             def forward(params, inputs, state, node_info):
                 return jnp.array(0.0), state
 
-        config = {"stride": [1, 1]}  # list instead of tuple
-        with pytest.raises(ValueError) as exc_info:
+        from fabricpc.core.config import ConfigValidationError
+        config = {"name": "test", "shape": (10,), "type": "custom", "stride": [1, 1]}  # list instead of tuple
+        with pytest.raises(ConfigValidationError) as exc_info:
             validate_node_config(NodeWithSchema, config)
         assert "stride" in str(exc_info.value)
         assert "tuple" in str(exc_info.value)
@@ -307,8 +307,9 @@ class TestConfigValidation:
             def forward(params, inputs, state, node_info):
                 return jnp.array(0.0), state
 
-        config = {"padding": "full"}  # not in choices
-        with pytest.raises(ValueError) as exc_info:
+        from fabricpc.core.config import ConfigValidationError
+        config = {"name": "test", "shape": (10,), "type": "custom", "padding": "full"}  # not in choices
+        with pytest.raises(ConfigValidationError) as exc_info:
             validate_node_config(NodeWithSchema, config)
         assert "padding" in str(exc_info.value)
         assert "valid" in str(exc_info.value)
@@ -333,7 +334,7 @@ class TestConfigValidation:
             def forward(params, inputs, state, node_info):
                 return jnp.array(0.0), state
 
-        config = {"name": "test"}  # missing stride and padding
+        config = {"name": "test", "shape": (10,), "type": "custom"}  # missing stride and padding
         result = validate_node_config(NodeWithSchema, config)
         assert result["stride"] == (1, 1)
         assert result["padding"] == "valid"

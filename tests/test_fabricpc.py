@@ -410,7 +410,7 @@ def test_different_activations(activation_type, rng_key):
     }
 
     params, structure = create_pc_graph(config, rng_key)
-    assert structure.nodes["hidden"].activation_config["type"] == activation_type
+    assert structure.nodes["hidden"].node_config["activation"]["type"] == activation_type
 
 
 @pytest.mark.parametrize("weight_init_type", ["uniform", "normal", "xavier", "kaiming"])

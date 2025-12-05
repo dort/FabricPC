@@ -11,7 +11,7 @@ Uses JAX for GPU acceleration and local (node-level) automatic differentiation.
 
 ## About Predictive Coding
 Predictive coding (PC) is a biologically-inspired framework for perception and learning in the brain. It posits that the brain continuously generates predictions about sensory inputs and updates its internal representations based on local prediction errors. 
-The predictive coding algorithm iteratively processes credit assignment and is equivalent to backpropagation of error under certain assumptions. It runs slower than backpropagation but has advantages of:
+PC performs bilevel optimization: an inner loop infers latent activations by minimizing prediction errors, while an outer loop updates weights via local Hebbian-like rules. Under certain conditions, this process is equivalent to backpropagation. While currently slower than backprop on standard hardware, PC offers:
 - Potential for faster inference on specialized hardware
 - Natural handling of recurrent and arbitrary architectures
 - Associative memory capabilities
@@ -45,23 +45,98 @@ python examples/mnist_demo.py
 ## Contributions
 Contributions are welcome! Please open issues or pull requests on the GitHub repository.
 
-This is a research-first project. APIs may change frequently until v1.0 release. Any breaking changes will be documented in the changelog.
+This is a research-first project. APIs may change frequently until v1.0 release. Any breaking changes are documented in the changelog.
 
 All demos must match baseline results and test suites must pass before merging new code.
 
 ## License: private until officially released. Please do not distribute.
 
-## Extensible Nodes
- - **Custom Nodes**: Easily create new node types by subclassing `BaseNode`
- - Single decorator to register a node class - no need to modify core code
- - Example custom node: examples/custom_node.py
- - External packages can register nodes via setuptools entry points.
+## Extending FabricPC
 
-**External package's `pyproject.toml`:**
+### Custom Nodes
+
+Create custom node types by subclassing `NodeBase`:
+
+```python
+from fabricpc.nodes import NodeBase, SlotSpec, register_node
+from fabricpc.core.types import NodeParams
+
+@register_node("my_node")  # Decorator to register node type
+class MyNode(NodeBase):
+    # Required: config schema for node-specific parameters
+    CONFIG_SCHEMA = {
+        "kernel_size": {"type": tuple, "required": True, "description": "Kernel dimensions"},
+        "stride": {"type": tuple, "default": (1, 1)},
+        "use_bias": {"type": bool, "default": True},
+    }
+
+    # Optional: override default energy/activation
+    DEFAULT_ENERGY_CONFIG = {"type": "gaussian"}
+    DEFAULT_ACTIVATION_CONFIG = {"type": "relu"}
+
+    @staticmethod
+    def get_slots():
+        return {"in": SlotSpec(name="in", is_multi_input=True)}
+
+    @staticmethod
+    def initialize_params(key, node_shape, input_shapes, config):
+        # Initialize weights/biases for each input edge
+        weights, biases = {}, {}
+        for edge_key, in_shape in input_shapes.items():
+            # ... initialize parameters
+            pass
+        return NodeParams(weights=weights, biases=biases)
+
+    @staticmethod
+    def forward(params, inputs, state, node_info):
+        # Compute forward pass, return (energy, updated_state)
+        pass
+```
+
+**Required methods:**
+- `get_slots()`: Define input slots (single or multi-input)
+- `initialize_params()`: Create weight/bias parameters
+- `forward()`: Compute forward pass and energy
+
+**Registration decorators by base class:**
+| Base Class | Decorator | Import |
+|------------|-----------|--------|
+| `NodeBase` | `@register_node("my_node")` | `from fabricpc.nodes import register_node` |
+| `EnergyFunctional` | `@register_energy("custom_energy")` | `from fabricpc.core.energy import register_energy` |
+| `ActivationBase` | `@register_activation("custom_activation")` | `from fabricpc.core.activations import register_activation` |
+
+**Required class attributes:**
+- `CONFIG_SCHEMA`: Dict defining node parameters with types, defaults, and validation
+
+**Schema field options:**
+```python
+{
+    "field_name": {
+        "type": int,              # Required: int, float, str, tuple, dict, list, bool
+        "required": True,         # Field must be provided (no default)
+        "default": 10,            # Default value if not provided
+        "choices": ["a", "b"],    # Allowed values
+        "description": "...",     # Documentation
+    }
+}
+```
+
+See `examples/custom_node.py` for a complete Conv2D implementation.
+
+### External Package Registration
+
+External packages can register extensions via entry points instead of decorators (auto-discovered on import):
+
+**`pyproject.toml`:**
 ```toml
 [project.entry-points."fabricpc.nodes"]
-myconv2d = "fabricpc_conv.nodes:MyConv2DNode"
-mytransformer = "fabricpc_transformer.nodes:MyTransformerBlock"
+myconv2d = "my_package.nodes:MyConv2DNode"
+
+[project.entry-points."fabricpc.energies"]
+custom_energy = "my_package.energy:CustomEnergy"
+
+[project.entry-points."fabricpc.activations"]
+custom_act = "my_package.activations:CustomActivation"
 ```
 
 ## Shape Conventions

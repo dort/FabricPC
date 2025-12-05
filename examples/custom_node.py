@@ -1,5 +1,5 @@
 """
-Example: Custom Conv2D Node with Flax
+Example: Custom Conv2D Node
 =====================================
 
 This example demonstrates:
@@ -166,7 +166,7 @@ class Conv2DNode(NodeBase):
                 pre_activation = pre_activation + params.biases["b"]
 
             # Apply activation
-            activation_fn, activation_deriv = get_activation(node_info.activation_config)
+            activation_fn, activation_deriv = get_activation(node_info.node_config["activation"])
             z_mu = activation_fn(pre_activation)
 
             # Compute error

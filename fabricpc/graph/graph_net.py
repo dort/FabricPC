@@ -7,289 +7,52 @@ validate slot connections, and initialize parameters at the node level.
 Edges direct the flow of information through the graph in inference and training.
 - Node output is passed to input slots of post-synaptic nodes
 - Node gets gradient contributions from post-synaptic nodes by querying its out_neighbors on each outgoing edge for the gradient contributions of that particular edge.
+
+Config schemas are defined at the appropriate level:
+- GRAPH_CONFIG_SCHEMA: Validates graph structure (node_list, edge_list, task_map)
+- EDGE_CONFIG_SCHEMA: Validates edge fields (source_name, target_name, slot)
+- Node-specific schemas: Defined in node classes (e.g., LinearNode.CONFIG_SCHEMA)
+- Energy/Activation schemas: Defined in their respective classes and validated via delegation
 """
 
-from typing import Dict, Tuple, List, Any
+from typing import Dict, Tuple, Any
 import jax
 import jax.numpy as jnp
 from fabricpc.core.types import (
-    NodeInfo,
-    EdgeInfo,
     NodeParams,
     GraphParams,
     NodeState,
     GraphState,
     GraphStructure,
-    SlotInfo,
 )
 from fabricpc.core.initialization import (
     initialize_state_values,
     parse_state_init_config,
     get_default_state_init,
 )
-from fabricpc.nodes import get_node_class, validate_node_config
+from fabricpc.nodes import get_node_class
 from fabricpc.core.inference import gather_inputs
 from fabricpc.utils.helpers import update_node_in_state
-
-
-def validate_node_and_build_slots(
-    node_config: dict,
-    node_name: str,
-    edges: Dict[str, EdgeInfo],
-) -> Dict[str, SlotInfo]:
-    """
-    Build and validate slots for a node based on its type and incoming edges.
-
-    Args:
-        node_config: Node configuration dictionary
-        node_name: Name of the node
-        edges: Dictionary of all edges in the graph
-
-    Returns:
-        Dictionary mapping slot names to SlotInfo objects
-
-    Raises:
-        ValueError: If edges connect to non-existent slots or violate slot constraints
-    """
-    default_node = "Linear"  # TODO change default to empty or raise error when missing from config
-    node_type = node_config.get("type", default_node).lower()
-    node_class = get_node_class(node_type)
-
-    # Get slot specifications from node class
-    slot_specs = node_class.get_slots()
-
-    # Build SlotInfo objects
-    slots = {}
-    for slot_name, slot_spec in slot_specs.items():
-        # Find incoming edges for this slot
-        in_neighbors = []
-        for edge_key, edge_info in edges.items():
-            if edge_info.target == node_name and edge_info.slot == slot_name:
-                in_neighbors.append(edge_info.source)
-
-        # Validate slot constraints
-        if not slot_spec.is_multi_input and len(in_neighbors) > 1:
-            raise ValueError(
-                f"Slot '{slot_name}' in node '{node_name}' is single-input "
-                f"but has {len(in_neighbors)} connections"
-            )
-
-        slots[slot_name] = SlotInfo(
-            name=slot_name,
-            parent_node=node_name,
-            is_multi_input=slot_spec.is_multi_input,
-            in_neighbors=tuple(in_neighbors),
-        )
-
-    # Validate that all incoming edges connect to valid slots
-    for edge_key, edge_info in edges.items():
-        if edge_info.target == node_name:
-            if edge_info.slot not in slots:
-                raise ValueError(
-                    f"Edge '{edge_key}' connects to non-existent slot '{edge_info.slot}' "
-                    f"in node '{node_name}'. Available slots: {list(slots.keys())}"
-                )
-
-    # Validate that SingleInput slots have no more than one incoming edge
-    for slot_name, slot_info in slots.items():
-        if not slot_info.is_multi_input and len(slot_info.in_neighbors) > 1:
-            raise ValueError(
-                f"Node '{node_name}' slot '{slot_name}' is single-input but has "
-                f"{len(slot_info.in_neighbors)} incoming edges"
-            )
-
-    return slots
+from fabricpc.core.config import ConfigValidationError
 
 
 def build_graph_structure(config: dict) -> GraphStructure:
     """
     Convert configuration dictionary to static GraphStructure with slot validation.
 
-    Expected config format:
-    {
-        "node_list": [
-            {
-                "name": "x",
-                "shape": (784,),
-                "type": "linear",
-                "activation": {"type": "identity"},
-                "weight_init": {"type": "normal", "std": 0.05}  # Optional
-            },
-            ...
-        ],
-        "edge_list": [
-            {"source_name": "x", "target_name": "h", "slot": "in"},
-            ...
-        ],
-        "task_map": {
-            "x": "x",  # task_name -> node_name
-            "y": "y"
-        }
-    }
+    This is a convenience function that delegates to GraphStructure.from_config().
 
     Args:
-        config: Configuration dictionary
+        config: Configuration dictionary with node_list, edge_list, task_map
 
     Returns:
         Immutable GraphStructure with validated slots
 
     Raises:
-        ValueError: If configuration is invalid or slots don't match
+        ValueError: If graph is misspecified
+        ConfigValidationError: If config validation fails
     """
-    if "node_list" not in config:
-        raise ValueError("config['node_list'] is required")
-    if "edge_list" not in config:
-        raise ValueError("config['edge_list'] is required")
-    if "task_map" not in config:
-        raise ValueError("config['task_map'] is required")
-
-    node_list = config["node_list"]
-    edge_list = config["edge_list"]
-    task_map = config["task_map"]
-
-    # Validate unique node names
-    node_names = [node["name"] for node in node_list]
-    if len(node_names) != len(set(node_names)):
-        # find the duplicate nodes
-        duplicates = set(
-            name for name in node_names if node_names.count(name) > 1
-        )
-        raise ValueError(f"duplicated nodes {duplicates}, names must be unique")
-
-    # Build edge dictionary first
-    edges: Dict[str, EdgeInfo] = {}
-    for edge_config in edge_list:
-        source = edge_config["source_name"]
-        target = edge_config["target_name"]
-        # Default slot is "in" for backward compatibility
-        slot = edge_config.get("slot", "in")
-
-        # Create edge key: source->target:slot
-        edge_key = f"{source}->{target}:{slot}"
-
-        if edge_key in edges:
-            raise ValueError(f"duplicate edge: {edge_key}")
-        if source == target:
-            raise ValueError(f"self-edge at: {source} is not allowed")
-        if source not in node_names:
-            raise ValueError(f"edge source node '{source}' does not exist")
-        if target not in node_names:
-            raise ValueError(f"edge target node '{target}' does not exist")
-
-        edges[edge_key] = EdgeInfo(key=edge_key, source=source, target=target, slot=slot)
-
-    # Build nodes with validated slots
-    nodes: Dict[str, NodeInfo] = {}
-
-    # TODO refactor node construction to validate node config and construct node using base class method. Pass the in-edges and out-edges to the node construction methods. Build the slot, energy functional, and activation function at node level.
-    for node_config in node_list:
-        name = node_config["name"]
-
-        # Parse shape from config (required)
-        if "shape" not in node_config:
-            raise ValueError(f"Node '{name}' must have 'shape' specified as a tuple, e.g., shape=(128,)")
-        shape = tuple(node_config["shape"])
-
-        node_type = node_config.get("type", "linear").lower()
-        activation_config = node_config.get("activation", {"type": "identity"})
-
-        # Validate config against node's CONFIG_SCHEMA and apply defaults
-        node_class = get_node_class(node_type)
-        validated_config = validate_node_config(node_class, node_config)
-
-        # Apply energy config: use user-specified or node class default
-        from fabricpc.core.energy import get_energy_class, validate_energy_config
-        energy_config = validated_config.get("energy", None)
-        if energy_config is None:
-            # Use node class default
-            energy_config = node_class.DEFAULT_ENERGY_CONFIG.copy()
-        elif isinstance(energy_config, str):
-            # Allow shorthand: "energy": "bernoulli"
-            energy_config = {"type": energy_config}
-
-        # Validate energy config
-        energy_type = energy_config.get("type", "gaussian")
-        energy_class = get_energy_class(energy_type)
-        validated_energy = validate_energy_config(energy_class, energy_config)
-        validated_config["energy"] = validated_energy
-
-        # Validate and build slots
-        slots = validate_node_and_build_slots(validated_config, name, edges)
-
-        # Find incoming and outgoing edges
-        in_edges: List[str] = []
-        out_edges: List[str] = []
-        for edge_key, edge_info in edges.items():
-            if edge_info.target == name:
-                in_edges.append(edge_key)
-            if edge_info.source == name:
-                out_edges.append(edge_key)
-
-        # Construct the node object with validated config (includes defaults)
-        nodes[name] = NodeInfo(
-            name=name,
-            shape=shape,
-            node_type=node_type,
-            node_config=validated_config,
-            activation_config=activation_config,
-            slots=slots,
-            in_degree=len(in_edges),
-            out_degree=len(out_edges),
-            in_edges=tuple(in_edges),
-            out_edges=tuple(out_edges),
-        )
-
-    # Compute topological order for efficient traversal
-    node_order = topological_sort(nodes, edges)
-
-    return GraphStructure(
-        nodes=nodes, edges=edges, task_map=task_map, node_order=node_order
-    )
-
-
-def topological_sort(
-    nodes: Dict[str, NodeInfo], edges: Dict[str, EdgeInfo]
-) -> Tuple[str, ...]:
-    """
-    Compute topological ordering of nodes for feedforward initialization.
-
-    Args:
-        nodes: Dictionary of node information
-        edges: Dictionary of edge information
-
-    Returns:
-        Tuple of node names in topological order
-
-    Note:
-        If the graph contains cycles, some nodes may be omitted from the order.
-    """
-    # Count in-degrees
-    in_degree = {name: info.in_degree for name, info in nodes.items()}
-
-    # Queue of nodes with no incoming edges
-    queue = [name for name, deg in in_degree.items() if deg == 0]
-    result = []
-
-    while queue:
-        # Pop a node with no incoming edges
-        node_name = queue.pop(0)
-        result.append(node_name)
-
-        # Reduce in-degree of neighbors
-        node_info = nodes[node_name]
-        for out_edge_key in node_info.out_edges:
-            edge_info = edges[out_edge_key]
-            target_name = edge_info.target
-            in_degree[target_name] -= 1
-
-            if in_degree[target_name] == 0:
-                queue.append(target_name)
-
-    if len(result) != len(nodes):
-        # Graph contains cycles
-        print("Warning: Graph contains cycles, using partial topological order")
-
-    return tuple(result)
+    return GraphStructure.from_config(config)
 
 
 def initialize_params(
@@ -406,7 +169,7 @@ def initialize_state(
                 fallback_config, node_key_map[node_name], shape
             )
         else:
-            raise ValueError(f"unknown init_method: {init_method}")
+            raise ConfigValidationError(f"unknown init_method: {init_method}")
 
         # Initialize latents, set other state components to zeros
         node_state_dict[node_name] = NodeState(
