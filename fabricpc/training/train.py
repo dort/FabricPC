@@ -15,7 +15,7 @@ from fabricpc.core.inference import run_inference, gather_inputs
 from fabricpc.nodes import get_node_class
 from fabricpc.core.types import NodeParams
 
-
+# TODO move to graph_net.py
 def compute_local_weight_gradients(
     params: GraphParams,
     final_state: GraphState,

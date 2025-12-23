@@ -19,6 +19,7 @@ import jax.numpy as jnp
 # WEIGHT INITIALIZATION (Backward Compatible)
 # ==============================================================================
 
+# TODO deprecated
 def initialize_weights(
     config: Dict[str, Any],
     key: jax.Array,
@@ -54,6 +55,7 @@ def initialize_weights(
     return initialize(key, shape, config)
 
 
+# TODO deprecated
 def get_default_weight_init() -> Dict[str, Any]:
     """Get default weight initialization config (normal with std=0.05)."""
     from fabricpc.core.initializers import get_default_weight_init as _get_default
@@ -64,6 +66,7 @@ def get_default_weight_init() -> Dict[str, Any]:
 # STATE INITIALIZATION (Backward Compatible)
 # ==============================================================================
 
+# TODO deprecated
 def initialize_state_values(
     config: Dict[str, Any],
     key: jax.Array,
@@ -96,6 +99,7 @@ def initialize_state_values(
     return initialize(key, shape, config)
 
 
+# TODO deprecated
 def parse_state_init_config(config: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
     """
     Parse state initialization config.
@@ -147,6 +151,7 @@ def parse_state_init_config(config: Dict[str, Any]) -> Tuple[str, Dict[str, Any]
         )
 
 
+# TODO deprecated
 def get_default_state_init() -> Dict[str, Any]:
     """Get default state initialization config."""
     from fabricpc.core.initializers import get_default_state_init as _get_default

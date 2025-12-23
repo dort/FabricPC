@@ -11,7 +11,7 @@ Refactor FabricPC's initialization system to use registry-based patterns consist
 
 - **Class Style**: Stateless with static methods (like EnergyFunctional)
 - **Interface**: Single `initialize(key, shape, config)` method
-- **Config Hierarchy**: Graph-level `state_initializer` config with node-level override via `node_config["state_initializer"]`
+- **Config Hierarchy**: Graph-level `graph_state_initializer` config with node-level override via `node_config["latent_init"]`
 
 ---
 
@@ -95,7 +95,7 @@ class StateInitBase(ABC):
 
 1. `DistributionStateInit`:
    - CONFIG: `default_initializer` (dict, default `{"type": "normal"}`)
-   - For each node: use `node_config["state_initializer"]` if present, else `default_initializer`
+   - For each node: use `node_config["latent_init"]` if present, else `default_initializer`
    - Processes nodes independently
 
 2. `FeedforwardStateInit`:
@@ -146,14 +146,14 @@ def initialize_state(structure, batch_size, rng_key, clamps=None, state_init_con
 
 ### Step 5: Update `fabricpc/nodes/base.py`
 
-Add `state_initializer` to `BASE_CONFIG_SCHEMA`:
+Add `latent_init` to `BASE_CONFIG_SCHEMA`:
 
 ```python
 BASE_CONFIG_SCHEMA = {
     "name": {"type": str, "required": True, ...},
     "shape": {"type": tuple, "required": True, ...},
     "type": {"type": str, "required": True, ...},
-    "state_initializer": {
+    "latent_init": {
         "type": dict,
         "default": None,
         "description": "Node-level state initialization config (overrides graph-level default)"
@@ -161,11 +161,11 @@ BASE_CONFIG_SCHEMA = {
 }
 ```
 
-Add `_resolve_state_initializer()` classmethod (similar to `_resolve_energy_config`):
+Add `_resolve_state_init_config()` classmethod (similar to `_resolve_energy_config`):
 - Returns `None` if not specified (let StateInitBase use graph-level default)
 - Validates against Initializer CONFIG_SCHEMA if specified
 
-Update `from_config()` to call `_resolve_state_initializer()`.
+Update `from_config()` to call `_resolve_state_init_config()`.
 
 ---
 
@@ -264,7 +264,7 @@ state = initialize_state(structure, batch_size, key, clamps, state_init_config, 
 graph_config = {
     "node_list": [...],
     "edge_list": [...],
-    "state_initializer": {
+    "graph_state_initializer": {
         "type": "distribution",
         "default_initializer": {"type": "normal", "mean": 0.0, "std": 0.01}
     }
@@ -277,7 +277,7 @@ graph_config = {
     "name": "hidden1",
     "shape": (256,),
     "type": "linear",
-    "state_initializer": {"type": "uniform", "min": -0.5, "max": 0.5}
+    "latent_init": {"type": "uniform", "min": -0.5, "max": 0.5}
 }
 ```
 

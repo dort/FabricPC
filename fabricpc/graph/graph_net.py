@@ -28,7 +28,7 @@ from fabricpc.core.types import (
 from fabricpc.nodes import get_node_class
 from fabricpc.utils.helpers import update_node_in_state
 
-
+# TODO deprecated
 def build_graph_structure(config: dict) -> GraphStructure:
     """
     Convert configuration dictionary to static GraphStructure with slot validation.
@@ -47,7 +47,7 @@ def build_graph_structure(config: dict) -> GraphStructure:
     """
     return GraphStructure.from_config(config)
 
-
+# TODO create abstraction and config schema for param initialization, similar to graph state initialization
 def initialize_params(
     structure: GraphStructure,
     rng_key: jax.Array,  # from jax.random.PRNGKey
@@ -103,7 +103,7 @@ def initialize_params(
 
     return GraphParams(nodes=node_params)
 
-
+# TODO deprecated
 def initialize_state(
     structure: GraphStructure,
     batch_size: int,

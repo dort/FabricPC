@@ -4,6 +4,7 @@ Graph state initialization strategies for predictive coding networks.
 This module provides:
 - StateInitBase abstract class for graph-level state initialization
 - Built-in strategies (Distribution, Feedforward)
+- TODO add uPC initialization class
 - Registry with decorator-based registration for custom strategies
 - Entry point discovery for external packages
 
@@ -50,7 +51,7 @@ Node-level overrides can be specified in node config:
         "name": "hidden",
         "shape": (256,),
         "type": "linear",
-        "state_initializer": {"type": "uniform", "min": -0.5, "max": 0.5}
+        "latent_init": {"type": "uniform", "min": -0.5, "max": 0.5}
     }
 """
 
@@ -260,7 +261,7 @@ class DistributionStateInit(StateInitBase):
     Initialize states from a distribution.
 
     Each node's state is initialized using an Initializer, either from:
-    1. Node-level config: node_config["state_initializer"]
+    1. Node-level config: node_config["latent_init"]
     2. Graph-level fallback: config["default_initializer"]
 
     Processes nodes independently (no dependencies between nodes).
@@ -304,8 +305,8 @@ class DistributionStateInit(StateInitBase):
             if node_name in clamps:
                 z_latent = clamps[node_name]
             else:
-                # Check for node-level state_initializer config
-                node_init_config = node_info.node_config.get("state_initializer")
+                # Check for node-level latent_init config
+                node_init_config = node_info.node_config.get("latent_init")
                 if node_init_config is None:
                     node_init_config = default_init_config
 

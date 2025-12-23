@@ -491,19 +491,19 @@ def initialize(
         arr = initialize(key, (784, 256), {"type": "xavier", "distribution": "uniform"})
     """
     if config is None:
-        config = {"type": "normal"}
+        raise ValueError("Initializer config must be provided.")
 
-    init_type = config.get("type", "normal")
+    init_type = config["type"]
     init_class = get_initializer_class(init_type)
 
     validated_config = validate_initializer_config(init_class, config)
     return init_class.initialize(key, shape, validated_config)
 
 
+# TODO deprecate these backward-compatible functions in future releases
 def get_default_weight_init() -> Dict[str, Any]:
     """Get default weight initialization config."""
     return {"type": "normal", "mean": 0.0, "std": 0.05}
-
 
 def get_default_state_init() -> Dict[str, Any]:
     """Get default state value initialization config."""

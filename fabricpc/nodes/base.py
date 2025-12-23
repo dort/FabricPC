@@ -402,7 +402,7 @@ class NodeBase(ABC):
         validated_config["activation"] = cls._resolve_activation_config(node_config)
 
         # 5. Resolve state initialization config (user override or class default)
-        validated_config["state_initializer"] = cls._resolve_state_init_config(node_config)
+        validated_config["latent_init"] = cls._resolve_state_init_config(node_config)
 
         # Construct the node object with validated config (includes defaults)
         return NodeInfo(
@@ -528,21 +528,21 @@ class NodeBase(ABC):
         """
         Resolve state initialization config with validation.
 
-        Uses node_config["state_initializer"] if specified, otherwise falls back to
-        cls.DEFAULT_STATE_INIT. Validates against state initializer class CONFIG_SCHEMA.
+        Uses node_config["latent_init"] if specified, otherwise returns None
+        to let the graph-level state initializer use its default.
 
         Args:
             node_config: Node configuration dictionary
 
         Returns:
-            Validated state initialization config dict
+            Validated state initialization config dict, or None if not specified
         """
         from fabricpc.core.initializers import get_initializer_class, validate_initializer_config
 
-        state_init_config = node_config.get("state_initializer")
+        state_init_config = node_config.get("latent_init")
 
         if state_init_config is None:
-            state_init_config = cls.DEFAULT_STATE_INIT.copy()
+            return None  # Let graph-level state initializer use its default
         elif isinstance(state_init_config, str):
             state_init_config = {"type": state_init_config}
 

@@ -53,35 +53,35 @@ config = {
             "activation": {"type": "identity"},
             "energy": energy_config,
             "weight_init": weight_init_config,
-            "use_bias": True, "flatten_input": False, "state_initializer": None,  # Use graph-level default
+            "use_bias": True, "flatten_input": False, "latent_init": None,  # Use graph-level default
         },
         {
             "name": "h1", "shape": (256,), "type": "linear",
             "activation": {"type": "sigmoid"},
             "energy": energy_config,
             "weight_init": weight_init_config,
-            "use_bias": True, "flatten_input": False, "state_initializer": None,
+            "use_bias": True, "flatten_input": False, "latent_init": None,
         },
         {
             "name": "h2", "shape": (128,), "type": "linear",
             "activation": {"type": "sigmoid"},
             "energy": energy_config,
             "weight_init": weight_init_config,
-            "use_bias": True, "flatten_input": True, "state_initializer": None,
+            "use_bias": True, "flatten_input": True, "latent_init": None,
         },
         {
             "name": "h3", "shape": (64,), "type": "linear",
             "activation": {"type": "sigmoid"},
             "energy": energy_config,
             "weight_init": weight_init_config,
-            "use_bias": True, "flatten_input": False, "state_initializer": None,
+            "use_bias": True, "flatten_input": False, "latent_init": None,
         },
         {
             "name": "class", "shape": (10,), "type": "linear",
             "activation": {"type": "sigmoid"},
             "energy": energy_config,
             "weight_init": weight_init_config,
-            "use_bias": True, "flatten_input": False, "state_initializer": None,
+            "use_bias": True, "flatten_input": False, "latent_init": None,
         },
     ],
 
