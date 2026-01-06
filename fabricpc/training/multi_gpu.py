@@ -13,6 +13,7 @@ import optax
 from fabricpc.core.types import GraphParams, GraphState, GraphStructure
 from fabricpc.core.inference import run_inference
 from fabricpc.graph.state_initializer import initialize_graph_state
+from fabricpc.training.train import get_graph_param_gradient
 
 
 def replicate_params(params: GraphParams, n_devices: int) -> GraphParams:
@@ -74,12 +75,26 @@ def shard_batch(batch: Dict[str, jnp.ndarray], n_devices: int) -> Dict[str, jnp.
     return jax.tree_util.tree_map(shard_array, batch)
 
 
+def unshard_grads(grads: GraphParams) -> GraphParams:
+    """
+    Average gradients from all devices.
+
+    Args:
+        grads: gradients from each device, shape (n_devices,)
+
+    Returns:
+        Average gradients across devices
+    """
+    return jax.tree_util.tree_map(lambda x: jnp.mean(x, axis=0), grads)
+
+
+# TODO deprecate once migrated to local learning dynamics using sharded gradients
 def unshard_losses(losses: jnp.ndarray) -> float:
     """
     Average losses from all devices.
 
     Args:
-        losses: Losses from each device, shape (n_devices,)
+        losses: Loss values from each device, shape (n_devices,)
 
     Returns:
         Average loss across devices
@@ -102,7 +117,6 @@ def train_step_pmap(
     Training step parallelized across devices using pmap.
 
     This is the core pmap'ed training step that will be replicated across devices.
-    Gradients are averaged using pmean before the parameter update.
 
     Args:
         params: Replicated parameters (has device axis)
@@ -229,11 +243,12 @@ def train_pcn_multi_gpu(
     if verbose:
         print(f"Training on {n_devices} device(s): {jax.devices()}")
 
-    if n_devices == 1:
-        if verbose:
-            print("Only 1 device available, falling back to single-GPU training")
-        from fabricpc.training import train_pcn
-        return train_pcn(params, structure, train_loader, config, rng_key, verbose)
+    # Don't use fallback to cingle-gpu method. Create shard even for single gpu to ensure consistency.
+    # if n_devices == 1:
+    #     if verbose:
+    #         print("Only 1 device available, falling back to single-GPU training")
+    #     from fabricpc.training import train_pcn
+    #     return train_pcn(params, structure, train_loader, config, rng_key, verbose)
 
     # Create optimizer
     optimizer = create_optimizer(config.get("optimizer", {"type": "adam", "lr": 1e-3}))

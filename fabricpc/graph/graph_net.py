@@ -27,6 +27,8 @@ from fabricpc.core.types import (
 )
 from fabricpc.nodes import get_node_class
 from fabricpc.utils.helpers import update_node_in_state
+from fabricpc.core.inference import gather_inputs
+
 
 # TODO deprecated
 def build_graph_structure(config: dict) -> GraphStructure:
@@ -46,6 +48,55 @@ def build_graph_structure(config: dict) -> GraphStructure:
         ConfigValidationError: If config validation fails
     """
     return GraphStructure.from_config(config)
+
+
+def compute_local_weight_gradients(
+    params: GraphParams,
+    final_state: GraphState,
+    structure: GraphStructure,
+) -> GraphParams:
+    """
+    Compute local weight gradients for each node using its own error signal.
+
+    This implements the local Hebbian learning rule for predictive coding:
+
+    Args:
+        params: Current model parameters
+        final_state: Converged state after inference
+        structure: Graph structure
+
+    Returns:
+        GraphParams containing gradients for the parameters
+    """
+    gradients = {}
+
+    for node_name, node_info in structure.nodes.items():
+        # Source nodes have no weights, but need empty gradient dict for consistency
+        if node_info.in_degree == 0:
+            gradients[node_name] = NodeParams(weights={}, biases={})
+            continue
+
+        in_edges_data = gather_inputs(node_info, structure, final_state)
+
+        # Get node class
+        node_class = get_node_class(node_info.node_type)
+
+        # Compute local gradients using node's method
+        node_state, grad_params = node_class.forward_learning(
+            params.nodes[node_name],
+            in_edges_data,
+            final_state.nodes[node_name],
+            node_info
+        )
+
+        # Store gradients
+        gradients[node_name] = grad_params
+
+    # convert to GraphParams
+    params_gradients = GraphParams(nodes=gradients)
+
+    return params_gradients
+
 
 # TODO create abstraction and config schema for param initialization, similar to graph state initialization
 def initialize_params(

@@ -11,57 +11,63 @@ import jax.numpy as jnp
 import optax
 
 from fabricpc.core.types import GraphParams, GraphState, GraphStructure
-from fabricpc.core.inference import run_inference, gather_inputs
-from fabricpc.nodes import get_node_class
-from fabricpc.core.types import NodeParams
+from fabricpc.core.inference import run_inference
+from fabricpc.graph.graph_net import compute_local_weight_gradients
 
-# TODO move to graph_net.py
-def compute_local_weight_gradients(
+def get_graph_param_gradient(
     params: GraphParams,
-    final_state: GraphState,
+    batch: Dict[str, jnp.ndarray],
     structure: GraphStructure,
-) -> GraphParams:
+    rng_key: jax.Array,
+    infer_steps: int,
+    eta_infer: float = 0.1,
+) -> Tuple[GraphParams, float, GraphState]:
     """
-    Compute local weight gradients for each node using its own error signal.
+    Compute parameter gradients for a batch without updating parameters.
 
-    This implements the local Hebbian learning rule for predictive coding:
+    Use this shared code for steps in single-gpu and multi-gpu training.
 
     Args:
         params: Current model parameters
-        final_state: Converged state after inference
+        batch: Batch of data with task-specific keys
         structure: Graph structure
+        rng_key: JAX random key for state initialization
+        infer_steps: Number of inference steps
+        eta_infer: Inference learning rate
 
     Returns:
-        GraphParams containing gradients for the parameters
+        Tuple of (grads, energy, final_state)
     """
-    gradients = {}
+    from fabricpc.graph.state_initializer import initialize_graph_state
 
-    for node_name, node_info in structure.nodes.items():
-        # Source nodes have no weights, but need empty gradient dict for consistency
-        if node_info.in_degree == 0:
-            gradients[node_name] = NodeParams(weights={}, biases={})
-            continue
+    batch_size = next(iter(batch.values())).shape[0]
 
-        in_edges_data = gather_inputs(node_info, structure, final_state)
+    # Map task names to node names
+    clamps = {}
+    for task_name, task_value in batch.items():
+        if task_name in structure.task_map:
+            node_name = structure.task_map[task_name]
+            clamps[node_name] = task_value
 
-        # Get node class
-        node_class = get_node_class(node_info.node_type)
+    # Initialize state using graph config
+    init_state = initialize_graph_state(
+        structure, batch_size, rng_key, clamps=clamps,
+        state_init_config=structure.config["graph_state_initializer"], params=params
+    )
 
-        # Compute local gradients using node's method
-        node_state, grad_params = node_class.forward_learning(
-            params.nodes[node_name],
-            in_edges_data,
-            final_state.nodes[node_name],
-            node_info
-        )
+    # Run inference to convergence
+    final_state = run_inference(
+        params, init_state, clamps, structure, infer_steps, eta_infer
+    )
 
-        # Store gradients
-        gradients[node_name] = grad_params
+    # Compute energy (ignore source nodes)
+    energy = sum([sum(final_state.nodes[node_name].energy) for node_name in structure.nodes if
+                  structure.nodes[node_name].in_degree > 0])
 
-    # convert to GraphParams
-    params_gradients = GraphParams(nodes=gradients)
+    # Compute LOCAL gradients for each node
+    grads = compute_local_weight_gradients(params, final_state, structure)
 
-    return params_gradients
+    return grads, energy, final_state
 
 
 def train_step(
@@ -95,34 +101,11 @@ def train_step(
     Returns:
         Tuple of (updated_params, updated_opt_state, energy, final_state)
     """
-    from fabricpc.graph.state_initializer import initialize_graph_state
 
-    batch_size = next(iter(batch.values())).shape[0]
-
-    # Map task names to node names
-    clamps = {}
-    for task_name, task_value in batch.items():
-        if task_name in structure.task_map:
-            node_name = structure.task_map[task_name]
-            clamps[node_name] = task_value
-
-    # Initialize state using graph config
-    init_state = initialize_graph_state(
-        structure, batch_size, rng_key, clamps=clamps,
-        state_init_config=structure.config["graph_state_initializer"], params=params
+    # Compute gradients
+    grads, energy, final_state = get_graph_param_gradient(
+        params, batch, structure, rng_key, infer_steps, eta_infer
     )
-
-    # Run inference to convergence
-    final_state = run_inference(
-        params, init_state, clamps, structure, infer_steps, eta_infer
-    )
-
-    # Compute energy (ignore source nodes)
-    energy = sum([sum(final_state.nodes[node_name].energy) for node_name in structure.nodes if
-                  structure.nodes[node_name].in_degree > 0])
-
-    # Compute LOCAL gradients for each node
-    grads = compute_local_weight_gradients(params, final_state, structure)
 
     # Update parameters using optimizer
     updates, opt_state = optimizer.update(grads, opt_state, params)
