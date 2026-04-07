@@ -187,59 +187,72 @@ def plot_accuracy_curves(
         show: Whether to display the plot
     """
     try:
-        import matplotlib.pyplot as plt
+        import plotly.graph_objects as go
+        from plotly.subplots import make_subplots
     except ImportError:
-        print("matplotlib not available for plotting")
+        print("plotly not available for plotting")
         return
 
-    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+    fig = make_subplots(
+        rows=1,
+        cols=2,
+        subplot_titles=("Training Progress per Task", "Final Accuracy per Task"),
+    )
 
     # Plot epoch accuracies
-    ax1 = axes[0]
     for summary in summaries:
         if summary.epoch_accuracies:
-            epochs = range(1, len(summary.epoch_accuracies) + 1)
-            ax1.plot(
-                epochs,
-                summary.epoch_accuracies,
-                label=f"Task {summary.task_id} ({summary.classes})",
+            epochs = list(range(1, len(summary.epoch_accuracies) + 1))
+            fig.add_trace(
+                go.Scatter(
+                    x=epochs,
+                    y=summary.epoch_accuracies,
+                    mode="lines+markers",
+                    name=f"Task {summary.task_id} ({summary.classes})",
+                ),
+                row=1,
+                col=1,
             )
 
-    ax1.set_xlabel("Epoch")
-    ax1.set_ylabel("Test Accuracy")
-    ax1.set_title("Training Progress per Task")
-    ax1.legend()
-    ax1.grid(True, alpha=0.3)
+    fig.update_xaxes(title_text="Epoch", row=1, col=1)
+    fig.update_yaxes(title_text="Test Accuracy", row=1, col=1)
 
     # Plot final accuracies
-    ax2 = axes[1]
     task_ids = [s.task_id for s in summaries]
     train_accs = [s.train_accuracy for s in summaries]
     test_accs = [s.test_accuracy for s in summaries]
 
-    x = np.arange(len(task_ids))
-    width = 0.35
+    fig.add_trace(
+        go.Bar(
+            x=[f"T{i}" for i in task_ids],
+            y=train_accs,
+            name="Train",
+            opacity=0.8,
+        ),
+        row=1,
+        col=2,
+    )
+    fig.add_trace(
+        go.Bar(
+            x=[f"T{i}" for i in task_ids],
+            y=test_accs,
+            name="Test",
+            opacity=0.8,
+        ),
+        row=1,
+        col=2,
+    )
 
-    ax2.bar(x - width / 2, train_accs, width, label="Train", alpha=0.8)
-    ax2.bar(x + width / 2, test_accs, width, label="Test", alpha=0.8)
+    fig.update_xaxes(title_text="Task ID", row=1, col=2)
+    fig.update_yaxes(title_text="Accuracy", row=1, col=2)
 
-    ax2.set_xlabel("Task ID")
-    ax2.set_ylabel("Accuracy")
-    ax2.set_title("Final Accuracy per Task")
-    ax2.set_xticks(x)
-    ax2.set_xticklabels([f"T{i}" for i in task_ids])
-    ax2.legend()
-    ax2.grid(True, alpha=0.3, axis="y")
-
-    plt.tight_layout()
+    fig.update_layout(height=500, width=1200, showlegend=True)
 
     if save_path:
-        plt.savefig(save_path, dpi=150, bbox_inches="tight")
+        fig.write_image(save_path)
 
     if show:
-        plt.show()
-
-    plt.close()
+        fig.show()
 
 
 def plot_accuracy_matrix(
@@ -256,51 +269,45 @@ def plot_accuracy_matrix(
         show: Whether to display the plot
     """
     try:
-        import matplotlib.pyplot as plt
+        import plotly.graph_objects as go
     except ImportError:
-        print("matplotlib not available for plotting")
+        print("plotly not available for plotting")
         return
 
-    fig, ax = plt.subplots(figsize=(8, 6))
+    # Create text annotations
+    text_matrix = [
+        [f"{matrix[i, j]:.2f}" for j in range(matrix.shape[1])]
+        for i in range(matrix.shape[0])
+    ]
 
-    im = ax.imshow(matrix, cmap="RdYlGn", vmin=0, vmax=1)
+    fig = go.Figure(
+        data=go.Heatmap(
+            z=matrix,
+            x=[f"T{i}" for i in range(matrix.shape[1])],
+            y=[f"After T{i}" for i in range(matrix.shape[0])],
+            text=text_matrix,
+            texttemplate="%{text}",
+            textfont={"size": 10},
+            colorscale="RdYlGn",
+            zmin=0,
+            zmax=1,
+            colorbar=dict(title="Accuracy"),
+        )
+    )
 
-    # Add colorbar
-    cbar = ax.figure.colorbar(im, ax=ax)
-    cbar.ax.set_ylabel("Accuracy", rotation=-90, va="bottom")
-
-    # Set labels
-    ax.set_xticks(np.arange(matrix.shape[1]))
-    ax.set_yticks(np.arange(matrix.shape[0]))
-    ax.set_xticklabels([f"T{i}" for i in range(matrix.shape[1])])
-    ax.set_yticklabels([f"After T{i}" for i in range(matrix.shape[0])])
-
-    ax.set_xlabel("Evaluated on Task")
-    ax.set_ylabel("Trained up to Task")
-    ax.set_title("Accuracy Matrix")
-
-    # Add text annotations
-    for i in range(matrix.shape[0]):
-        for j in range(matrix.shape[1]):
-            text = ax.text(
-                j,
-                i,
-                f"{matrix[i, j]:.2f}",
-                ha="center",
-                va="center",
-                color="black" if matrix[i, j] > 0.5 else "white",
-                fontsize=8,
-            )
-
-    plt.tight_layout()
+    fig.update_layout(
+        title="Accuracy Matrix",
+        xaxis_title="Evaluated on Task",
+        yaxis_title="Trained up to Task",
+        height=600,
+        width=800,
+    )
 
     if save_path:
-        plt.savefig(save_path, dpi=150, bbox_inches="tight")
+        fig.write_image(save_path)
 
     if show:
-        plt.show()
-
-    plt.close()
+        fig.show()
 
 
 def plot_forgetting_analysis(
@@ -317,55 +324,71 @@ def plot_forgetting_analysis(
         show: Whether to display the plot
     """
     try:
-        import matplotlib.pyplot as plt
+        import plotly.graph_objects as go
+        from plotly.subplots import make_subplots
+        import plotly.express as px
     except ImportError:
-        print("matplotlib not available for plotting")
+        print("plotly not available for plotting")
         return
 
-    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+    fig = make_subplots(
+        rows=1,
+        cols=2,
+        subplot_titles=("Per-Task Forgetting", "Accuracy Evolution per Task"),
+    )
 
     # Plot per-task forgetting
-    ax1 = axes[0]
     forgetting = compute_forgetting(accuracy_matrix)
-    task_ids = range(len(forgetting))
+    task_ids = list(range(len(forgetting)))
 
-    ax1.bar(task_ids, forgetting, alpha=0.8)
-    ax1.set_xlabel("Task ID")
-    ax1.set_ylabel("Forgetting (accuracy drop)")
-    ax1.set_title("Per-Task Forgetting")
-    ax1.set_xticks(task_ids)
-    ax1.grid(True, alpha=0.3, axis="y")
+    fig.add_trace(
+        go.Bar(
+            x=[f"T{i}" for i in task_ids],
+            y=forgetting,
+            opacity=0.8,
+            name="Forgetting",
+            showlegend=False,
+        ),
+        row=1,
+        col=1,
+    )
+
+    fig.update_xaxes(title_text="Task ID", row=1, col=1)
+    fig.update_yaxes(title_text="Forgetting (accuracy drop)", row=1, col=1)
 
     # Plot accuracy evolution per task
-    ax2 = axes[1]
     num_tasks = accuracy_matrix.shape[1]
-    colors = plt.cm.tab10(np.linspace(0, 1, num_tasks))
+    colors = px.colors.qualitative.Plotly
 
     for task in range(num_tasks):
         # Plot accuracy on this task over training
         task_accs = accuracy_matrix[:, task]
         # Only show from when task was trained
-        x = range(task, len(task_accs))
-        y = task_accs[task:]
-        ax2.plot(
-            x, y, marker="o", markersize=4, label=f"Task {task}", color=colors[task]
+        x = list(range(task, len(task_accs)))
+        y = task_accs[task:].tolist()
+        fig.add_trace(
+            go.Scatter(
+                x=[f"T{i}" for i in x],
+                y=y,
+                mode="lines+markers",
+                name=f"Task {task}",
+                marker=dict(size=6),
+                line=dict(color=colors[task % len(colors)]),
+            ),
+            row=1,
+            col=2,
         )
 
-    ax2.set_xlabel("After Training Task")
-    ax2.set_ylabel("Accuracy")
-    ax2.set_title("Accuracy Evolution per Task")
-    ax2.legend(loc="lower left")
-    ax2.grid(True, alpha=0.3)
+    fig.update_xaxes(title_text="After Training Task", row=1, col=2)
+    fig.update_yaxes(title_text="Accuracy", row=1, col=2)
 
-    plt.tight_layout()
+    fig.update_layout(height=500, width=1200, showlegend=True)
 
     if save_path:
-        plt.savefig(save_path, dpi=150, bbox_inches="tight")
+        fig.write_image(save_path)
 
     if show:
-        plt.show()
-
-    plt.close()
+        fig.show()
 
 
 def plot_support_selection(
@@ -384,12 +407,10 @@ def plot_support_selection(
         show: Whether to display the plot
     """
     try:
-        import matplotlib.pyplot as plt
+        import plotly.graph_objects as go
     except ImportError:
-        print("matplotlib not available for plotting")
+        print("plotly not available for plotting")
         return
-
-    fig, ax = plt.subplots(figsize=(10, 6))
 
     # Create selection matrix
     num_tasks = len(summaries)
@@ -400,25 +421,29 @@ def plot_support_selection(
             if col < num_columns:
                 selection[i, col] = 1
 
-    im = ax.imshow(selection, cmap="Blues", aspect="auto")
+    fig = go.Figure(
+        data=go.Heatmap(
+            z=selection,
+            x=list(range(num_columns)),
+            y=[f"Task {s.task_id}" for s in summaries],
+            colorscale="Blues",
+            showscale=False,
+        )
+    )
 
-    ax.set_xlabel("Column Index")
-    ax.set_ylabel("Task ID")
-    ax.set_title("Support Column Selection")
-
-    # Set ticks
-    ax.set_yticks(range(num_tasks))
-    ax.set_yticklabels([f"Task {s.task_id}" for s in summaries])
-
-    plt.tight_layout()
+    fig.update_layout(
+        title="Support Column Selection",
+        xaxis_title="Column Index",
+        yaxis_title="Task ID",
+        height=600,
+        width=1000,
+    )
 
     if save_path:
-        plt.savefig(save_path, dpi=150, bbox_inches="tight")
+        fig.write_image(save_path)
 
     if show:
-        plt.show()
-
-    plt.close()
+        fig.show()
 
 
 def print_summary_table(summaries: Sequence[TaskRunSummary]):

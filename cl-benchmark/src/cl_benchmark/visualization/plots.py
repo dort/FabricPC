@@ -30,56 +30,48 @@ def plot_accuracy_matrix(
         save_path: Optional path to save the figure
         show: Whether to display the plot
         title: Plot title
-        figsize: Figure size
+        figsize: Figure size (width, height)
     """
-    import matplotlib.pyplot as plt
-
-    fig, ax = plt.subplots(figsize=figsize)
+    import plotly.graph_objects as go
 
     num_tasks = matrix.shape[0]
 
-    # Create heatmap
-    im = ax.imshow(matrix, cmap="YlGn", vmin=0, vmax=1, aspect="auto")
+    # Create text annotations (only for lower triangle where data exists)
+    text_matrix = [
+        [f"{matrix[i, j]:.2f}" if i >= j else "" for j in range(num_tasks)]
+        for i in range(num_tasks)
+    ]
 
-    # Add colorbar
-    cbar = plt.colorbar(im, ax=ax)
-    cbar.set_label("Accuracy")
+    fig = go.Figure(
+        data=go.Heatmap(
+            z=matrix,
+            x=[f"T{i}" for i in range(num_tasks)],
+            y=[f"T{i}" for i in range(num_tasks)],
+            text=text_matrix,
+            texttemplate="%{text}",
+            textfont={"size": 10},
+            colorscale="YlGn",
+            zmin=0,
+            zmax=1,
+            colorbar=dict(title="Accuracy"),
+        )
+    )
 
-    # Add value annotations
-    for i in range(num_tasks):
-        for j in range(num_tasks):
-            if i >= j:  # Only show upper triangle where data exists
-                value = matrix[i, j]
-                color = "white" if value > 0.5 else "black"
-                ax.text(
-                    j,
-                    i,
-                    f"{value:.2f}",
-                    ha="center",
-                    va="center",
-                    color=color,
-                    fontsize=8,
-                )
-
-    # Labels
-    ax.set_xlabel("Evaluated on Task")
-    ax.set_ylabel("After Training Task")
-    ax.set_title(title)
-
-    ax.set_xticks(range(num_tasks))
-    ax.set_yticks(range(num_tasks))
-    ax.set_xticklabels([f"T{i}" for i in range(num_tasks)])
-    ax.set_yticklabels([f"T{i}" for i in range(num_tasks)])
-
-    plt.tight_layout()
+    fig.update_layout(
+        title=title,
+        xaxis_title="Evaluated on Task",
+        yaxis_title="After Training Task",
+        height=figsize[1] * 100,
+        width=figsize[0] * 100,
+    )
 
     if save_path:
-        plt.savefig(save_path, dpi=150, bbox_inches="tight")
+        fig.write_image(save_path)
 
     if show:
-        plt.show()
-    else:
-        plt.close()
+        fig.show()
+
+    return fig
 
 
 def plot_forgetting_analysis(
@@ -97,66 +89,83 @@ def plot_forgetting_analysis(
         matrix: Accuracy matrix of shape (T, T)
         save_path: Optional path to save the figure
         show: Whether to display the plot
-        figsize: Figure size
+        figsize: Figure size (width, height)
     """
-    import matplotlib.pyplot as plt
+    import plotly.graph_objects as go
+    from plotly.subplots import make_subplots
+    import plotly.express as px
 
     from cl_benchmark.metrics import compute_forgetting
-
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=figsize)
 
     num_tasks = matrix.shape[0]
     forgetting = compute_forgetting(matrix)
 
-    # Plot 1: Forgetting bars
-    colors = plt.cm.Reds(np.linspace(0.3, 0.9, num_tasks))
-    bars = ax1.bar(range(num_tasks), forgetting, color=colors)
-    ax1.set_xlabel("Task")
-    ax1.set_ylabel("Forgetting")
-    ax1.set_title("Per-Task Forgetting")
-    ax1.set_xticks(range(num_tasks))
-    ax1.set_xticklabels([f"T{i}" for i in range(num_tasks)])
-    ax1.set_ylim(0, max(0.5, max(forgetting) * 1.1))
+    fig = make_subplots(
+        rows=1,
+        cols=2,
+        subplot_titles=("Per-Task Forgetting", "Accuracy Evolution"),
+    )
 
-    # Add value labels on bars
-    for bar, val in zip(bars, forgetting):
-        if val > 0.01:
-            ax1.text(
-                bar.get_x() + bar.get_width() / 2,
-                bar.get_height() + 0.01,
-                f"{val:.2f}",
-                ha="center",
-                va="bottom",
-                fontsize=8,
-            )
+    # Plot 1: Forgetting bars
+    colors = px.colors.sequential.Reds[3:]
+    bar_colors = [colors[min(i, len(colors) - 1)] for i in range(num_tasks)]
+
+    fig.add_trace(
+        go.Bar(
+            x=[f"T{i}" for i in range(num_tasks)],
+            y=forgetting,
+            marker_color=bar_colors,
+            text=[f"{v:.2f}" if v > 0.01 else "" for v in forgetting],
+            textposition="outside",
+            showlegend=False,
+        ),
+        row=1,
+        col=1,
+    )
+
+    fig.update_yaxes(
+        title_text="Forgetting",
+        range=[0, max(0.5, max(forgetting) * 1.1)],
+        row=1,
+        col=1,
+    )
+    fig.update_xaxes(title_text="Task", row=1, col=1)
 
     # Plot 2: Accuracy evolution
-    colors = plt.cm.tab10(np.linspace(0, 1, num_tasks))
+    colors = px.colors.qualitative.Plotly
+
     for task in range(num_tasks):
         accuracies = matrix[task:, task]  # Accuracy on task 'task' over time
-        x = range(task, num_tasks)
-        ax2.plot(
-            x, accuracies, "o-", color=colors[task], label=f"Task {task}", markersize=4
+        x = list(range(task, num_tasks))
+        fig.add_trace(
+            go.Scatter(
+                x=[f"T{i}" for i in x],
+                y=accuracies.tolist(),
+                mode="lines+markers",
+                name=f"Task {task}",
+                marker=dict(size=6),
+                line=dict(color=colors[task % len(colors)]),
+            ),
+            row=1,
+            col=2,
         )
 
-    ax2.set_xlabel("After Training Task")
-    ax2.set_ylabel("Accuracy")
-    ax2.set_title("Accuracy Evolution")
-    ax2.set_xticks(range(num_tasks))
-    ax2.set_xticklabels([f"T{i}" for i in range(num_tasks)])
-    ax2.legend(loc="lower left", fontsize=8)
-    ax2.set_ylim(0, 1.05)
-    ax2.grid(True, alpha=0.3)
+    fig.update_xaxes(title_text="After Training Task", row=1, col=2)
+    fig.update_yaxes(title_text="Accuracy", range=[0, 1.05], row=1, col=2)
 
-    plt.tight_layout()
+    fig.update_layout(
+        height=figsize[1] * 100,
+        width=figsize[0] * 100,
+        showlegend=True,
+    )
 
     if save_path:
-        plt.savefig(save_path, dpi=150, bbox_inches="tight")
+        fig.write_image(save_path)
 
     if show:
-        plt.show()
-    else:
-        plt.close()
+        fig.show()
+
+    return fig
 
 
 def plot_learning_curves(
@@ -172,55 +181,75 @@ def plot_learning_curves(
         results: BenchmarkResults containing accuracy matrices
         save_path: Optional path to save the figure
         show: Whether to display the plot
-        figsize: Figure size
+        figsize: Figure size (width, height)
     """
-    import matplotlib.pyplot as plt
+    import plotly.graph_objects as go
+    import plotly.express as px
 
     if not results.accuracy_matrices:
         print("No accuracy matrices to plot.")
         return
 
-    fig, ax = plt.subplots(figsize=figsize)
-
     mean_matrix = results.get_mean_accuracy_matrix()
     std_matrix = results.get_std_accuracy_matrix()
     num_tasks = mean_matrix.shape[0]
 
-    colors = plt.cm.tab10(np.linspace(0, 1, num_tasks))
+    fig = go.Figure()
+    colors = px.colors.qualitative.Plotly
 
     for task in range(num_tasks):
         # Get accuracy on this task over time (after it was learned)
         mean_accs = mean_matrix[task:, task]
         std_accs = std_matrix[task:, task]
-        x = np.arange(task, num_tasks)
+        x = list(range(task, num_tasks))
+        x_labels = [f"T{i}" for i in x]
 
-        ax.plot(x, mean_accs, "o-", color=colors[task], label=f"Task {task}")
-        ax.fill_between(
-            x,
-            mean_accs - std_accs,
-            mean_accs + std_accs,
-            color=colors[task],
-            alpha=0.2,
+        color = colors[task % len(colors)]
+
+        # Add mean line
+        fig.add_trace(
+            go.Scatter(
+                x=x_labels,
+                y=mean_accs.tolist(),
+                mode="lines+markers",
+                name=f"Task {task}",
+                line=dict(color=color),
+                marker=dict(size=6),
+            )
         )
 
-    ax.set_xlabel("After Training Task")
-    ax.set_ylabel("Accuracy")
-    ax.set_title(f"Learning Curves: {results.model_name}")
-    ax.set_xticks(range(num_tasks))
-    ax.set_xticklabels([f"T{i}" for i in range(num_tasks)])
-    ax.legend(loc="lower left")
-    ax.set_ylim(0, 1.05)
-    ax.grid(True, alpha=0.3)
+        # Add std band
+        fig.add_trace(
+            go.Scatter(
+                x=x_labels + x_labels[::-1],
+                y=(mean_accs + std_accs).tolist()
+                + (mean_accs - std_accs).tolist()[::-1],
+                fill="toself",
+                fillcolor=color,
+                opacity=0.2,
+                line=dict(color="rgba(0,0,0,0)"),
+                showlegend=False,
+                hoverinfo="skip",
+            )
+        )
 
-    plt.tight_layout()
+    fig.update_layout(
+        title=f"Learning Curves: {results.model_name}",
+        xaxis_title="After Training Task",
+        yaxis_title="Accuracy",
+        yaxis_range=[0, 1.05],
+        height=figsize[1] * 100,
+        width=figsize[0] * 100,
+        showlegend=True,
+    )
 
     if save_path:
-        plt.savefig(save_path, dpi=150, bbox_inches="tight")
+        fig.write_image(save_path)
 
     if show:
-        plt.show()
-    else:
-        plt.close()
+        fig.show()
+
+    return fig
 
 
 def plot_method_comparison(
@@ -238,15 +267,14 @@ def plot_method_comparison(
         metric: Which metric to compare ("average_accuracy", "forgetting", "bwt")
         save_path: Optional path to save the figure
         show: Whether to display the plot
-        figsize: Figure size
+        figsize: Figure size (width, height)
     """
-    import matplotlib.pyplot as plt
+    import plotly.graph_objects as go
+    import plotly.express as px
 
     if not results_dict:
         print("No results to compare.")
         return
-
-    fig, ax = plt.subplots(figsize=figsize)
 
     # Get metric values
     methods = list(results_dict.keys())
@@ -274,42 +302,37 @@ def plot_method_comparison(
     stds = [stds[i] for i in sorted_idx]
 
     # Create bar chart
-    x = np.arange(len(methods))
-    colors = plt.cm.viridis(np.linspace(0.2, 0.8, len(methods)))
+    colors = px.colors.sequential.Viridis[2:-2]
+    bar_colors = [colors[i % len(colors)] for i in range(len(methods))]
 
-    bars = ax.bar(x, means, yerr=stds, capsize=5, color=colors)
+    fig = go.Figure()
 
-    # Add value labels
-    for bar, mean, std in zip(bars, means, stds):
-        label = f"{mean:.3f}"
-        ax.text(
-            bar.get_x() + bar.get_width() / 2,
-            bar.get_height() + std + 0.01,
-            label,
-            ha="center",
-            va="bottom",
-            fontsize=9,
+    fig.add_trace(
+        go.Bar(
+            x=methods,
+            y=means,
+            error_y=dict(type="data", array=stds, visible=True),
+            marker_color=bar_colors,
+            text=[f"{m:.3f}" for m in means],
+            textposition="outside",
         )
+    )
 
-    ax.set_xlabel("Method")
-    ax.set_ylabel(metric.replace("_", " ").title())
-    ax.set_title(f"Method Comparison: {metric.replace('_', ' ').title()}")
-    ax.set_xticks(x)
-    ax.set_xticklabels(methods, rotation=45, ha="right")
+    y_max = 1.1 if metric == "average_accuracy" else max(means) * 1.3 if means else 0.5
 
-    if metric == "average_accuracy":
-        ax.set_ylim(0, 1.1)
-    elif metric == "forgetting":
-        ax.set_ylim(0, max(means) * 1.3 if means else 0.5)
-
-    ax.grid(True, alpha=0.3, axis="y")
-
-    plt.tight_layout()
+    fig.update_layout(
+        title=f"Method Comparison: {metric.replace('_', ' ').title()}",
+        xaxis_title="Method",
+        yaxis_title=metric.replace("_", " ").title(),
+        yaxis_range=[0, y_max],
+        height=figsize[1] * 100,
+        width=figsize[0] * 100,
+    )
 
     if save_path:
-        plt.savefig(save_path, dpi=150, bbox_inches="tight")
+        fig.write_image(save_path)
 
     if show:
-        plt.show()
-    else:
-        plt.close()
+        fig.show()
+
+    return fig

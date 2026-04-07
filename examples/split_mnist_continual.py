@@ -238,7 +238,7 @@ def main():
     save_summaries_json(trainer.summaries, run_dir / "summaries.json")
     save_accuracy_matrix(acc_matrix, run_dir / "accuracy_matrix.csv")
 
-    # Plotting (if matplotlib available)
+    # Plotting (requires plotly; kaleido for PNG export)
     try:
         print("\nGenerating plots...")
         plot_accuracy_curves(

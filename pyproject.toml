@@ -34,7 +34,7 @@ dependencies = [
     "numpy>=1.24.0",
     "tqdm>=4.65.0",
     "optuna",
-    "matplotlib",
+    "plotly>=5.0.0",
 ]
 
 [project.optional-dependencies]
@@ -59,7 +59,6 @@ cuda13 = [
     "jax[cuda13]",
 ]
 viz = [
-    "plotly>=5.0.0",
     "kaleido>=0.2.1",
     "pandas>=2.0.0",
 ]
