@@ -26,11 +26,12 @@ import numpy as np
 try:
     import jax
     import jax.numpy as jnp
+    from jax import lax
 
     HAS_JAX = True
 except ImportError:
     HAS_JAX = False
-    jnp = np
+    jnp = np  # type: ignore
 
 # Import configs from central config module
 from fabricpc.continual.config import (

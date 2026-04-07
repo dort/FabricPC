@@ -33,13 +33,16 @@ try:
     HAS_JAX = True
 except ImportError:
     HAS_JAX = False
-    jnp = np  # Fallback to numpy
+    jnp = np  # type: ignore
 
 # Import optimal transport utilities from shared module
 from fabricpc.continual.optimal_transport import (
     sinkhorn_1d_correction,
     erfinv_approx,
 )
+
+# Type alias for array types
+ArrayType = np.ndarray  # For type hints, actual implementation uses jnp when available
 
 # ----------------------------
 # Configuration
@@ -82,13 +85,15 @@ class PerWeightCausalConfig:
 
 
 # ----------------------------
-# Utility Functions
+# Utility Functions (JAX-accelerated)
 # ----------------------------
 
 
-def compute_weight_excess_kurtosis(gradients: np.ndarray) -> np.ndarray:
+def compute_weight_excess_kurtosis(gradients: ArrayType) -> ArrayType:
     """
     Compute excess kurtosis for each weight from gradient history.
+
+    Uses JAX for efficient computation when available.
 
     Args:
         gradients: Array of shape (history_size, *weight_shape)
@@ -96,30 +101,33 @@ def compute_weight_excess_kurtosis(gradients: np.ndarray) -> np.ndarray:
     Returns:
         Array of shape (*weight_shape) with per-weight excess kurtosis
     """
+    gradients = jnp.asarray(gradients, dtype=jnp.float32)
+
     if gradients.shape[0] < 4:
-        return np.zeros(gradients.shape[1:])
+        return jnp.zeros(gradients.shape[1:], dtype=jnp.float32)
 
     # Compute along history axis (axis=0)
-    mean = np.mean(gradients, axis=0)
-    std = np.std(gradients, axis=0)
+    mean = jnp.mean(gradients, axis=0)
+    std = jnp.std(gradients, axis=0)
 
     # Avoid division by zero
-    std = np.clip(std, 1e-8, None)
+    std = jnp.clip(std, 1e-8, None)
 
     # Standardize
     z = (gradients - mean) / std
 
     # Fourth moment minus 3 (excess kurtosis)
-    kurtosis = np.mean(z**4, axis=0) - 3.0
+    kurtosis = jnp.mean(z**4, axis=0) - 3.0
 
     return kurtosis
 
 
-def compute_weight_multimodal_gap(gradients: np.ndarray) -> np.ndarray:
+def compute_weight_multimodal_gap(gradients: ArrayType) -> ArrayType:
     """
     Compute multimodal gap metric for each weight.
 
     Measures separation between lower and upper halves of gradient distribution.
+    Uses JAX for efficient computation when available.
 
     Args:
         gradients: Array of shape (history_size, *weight_shape)
@@ -127,42 +135,44 @@ def compute_weight_multimodal_gap(gradients: np.ndarray) -> np.ndarray:
     Returns:
         Array of shape (*weight_shape) with per-weight multimodal gap
     """
-    if gradients.shape[0] < 4:
-        return np.zeros(gradients.shape[1:])
+    gradients = jnp.asarray(gradients, dtype=jnp.float32)
 
-    median = np.median(gradients, axis=0, keepdims=True)
-    std = np.std(gradients, axis=0)
-    std = np.clip(std, 1e-8, None)
+    if gradients.shape[0] < 4:
+        return jnp.zeros(gradients.shape[1:], dtype=jnp.float32)
+
+    # Compute median and std
+    median = jnp.median(gradients, axis=0, keepdims=True)
+    std = jnp.std(gradients, axis=0)
+    std = jnp.clip(std, 1e-8, None)
 
     # Split into lower and upper halves
     lower_mask = gradients <= median
     upper_mask = gradients > median
 
-    # Compute means for each half (handling edge cases)
-    # Use nanmean with masked arrays
-    lower_vals = np.where(lower_mask, gradients, np.nan)
-    upper_vals = np.where(upper_mask, gradients, np.nan)
+    # Compute means for each half using masked operations
+    # For JAX compatibility, use where with sum/count instead of nanmean
+    lower_sum = jnp.sum(jnp.where(lower_mask, gradients, 0.0), axis=0)
+    lower_count = jnp.sum(lower_mask.astype(jnp.float32), axis=0)
+    lower_mean = lower_sum / jnp.maximum(lower_count, 1.0)
 
-    with np.errstate(all="ignore"):
-        lower_mean = np.nanmean(lower_vals, axis=0)
-        upper_mean = np.nanmean(upper_vals, axis=0)
+    upper_sum = jnp.sum(jnp.where(upper_mask, gradients, 0.0), axis=0)
+    upper_count = jnp.sum(upper_mask.astype(jnp.float32), axis=0)
+    upper_mean = upper_sum / jnp.maximum(upper_count, 1.0)
 
-    # Replace NaN with 0
-    lower_mean = np.nan_to_num(lower_mean, nan=0.0)
-    upper_mean = np.nan_to_num(upper_mean, nan=0.0)
-
-    gap = np.abs(upper_mean - lower_mean) / std
+    gap = jnp.abs(upper_mean - lower_mean) / std
 
     return gap
 
 
 def compute_non_gaussianity_score(
-    kurtosis: np.ndarray,
-    multimodal: np.ndarray,
+    kurtosis: ArrayType,
+    multimodal: ArrayType,
     config: PerWeightCausalConfig,
-) -> np.ndarray:
+) -> ArrayType:
     """
     Compute combined non-Gaussianity score.
+
+    Uses JAX for efficient computation when available.
 
     Args:
         kurtosis: Per-weight excess kurtosis
@@ -172,9 +182,12 @@ def compute_non_gaussianity_score(
     Returns:
         Combined non-Gaussianity score per weight
     """
+    kurtosis = jnp.asarray(kurtosis, dtype=jnp.float32)
+    multimodal = jnp.asarray(multimodal, dtype=jnp.float32)
+
     # Excess beyond thresholds
-    kurt_excess = np.maximum(0.0, np.abs(kurtosis) - config.kurtosis_threshold)
-    multi_excess = np.maximum(0.0, multimodal - config.multimodal_threshold)
+    kurt_excess = jnp.maximum(0.0, jnp.abs(kurtosis) - config.kurtosis_threshold)
+    multi_excess = jnp.maximum(0.0, multimodal - config.multimodal_threshold)
 
     # Combined score
     score = kurt_excess + multi_excess
@@ -349,6 +362,8 @@ class PerWeightNonGaussianityDetector:
         """
         Detect non-Gaussianity for a parameter's weights.
 
+        Uses JAX for efficient computation when available.
+
         Args:
             param_name: Name of the parameter
 
@@ -362,19 +377,19 @@ class PerWeightNonGaussianityDetector:
         if history is None:
             return None
 
-        # Compute per-weight statistics
+        # Compute per-weight statistics (JAX-accelerated)
         kurtosis = compute_weight_excess_kurtosis(history)
         multimodal = compute_weight_multimodal_gap(history)
         score = compute_non_gaussianity_score(kurtosis, multimodal, self.config)
 
         # Determine non-Gaussian mask
         if self.config.blend_mode == "hard":
-            mask = score > self.config.combined_threshold
+            mask = (score > self.config.combined_threshold).astype(jnp.float32)
         else:
-            # Soft mask using sigmoid
+            # Soft mask using sigmoid (JAX-compatible)
             mask = 1.0 / (
                 1.0
-                + np.exp(
+                + jnp.exp(
                     -self.config.soft_blend_scale
                     * (score - self.config.combined_threshold)
                 )
@@ -383,22 +398,23 @@ class PerWeightNonGaussianityDetector:
         # Compute summary statistics
         n_total = kurtosis.size
         if self.config.blend_mode == "hard":
-            n_non_gaussian = np.sum(mask)
+            n_non_gaussian = float(jnp.sum(mask))
         else:
-            n_non_gaussian = np.sum(mask > 0.5)
+            n_non_gaussian = float(jnp.sum(mask > 0.5))
 
         frac_non_gaussian = float(n_non_gaussian) / max(1, n_total)
 
+        # Convert to numpy arrays for storage in result (keeps compatibility)
         return PerWeightNonGaussianityResult(
             param_name=param_name,
-            kurtosis=kurtosis,
-            multimodal=multimodal,
-            non_gaussian_score=score,
-            non_gaussian_mask=mask,
+            kurtosis=np.asarray(kurtosis),
+            multimodal=np.asarray(multimodal),
+            non_gaussian_score=np.asarray(score),
+            non_gaussian_mask=np.asarray(mask),
             fraction_non_gaussian=frac_non_gaussian,
-            mean_kurtosis=float(np.mean(np.abs(kurtosis))),
-            mean_multimodal=float(np.mean(multimodal)),
-            max_kurtosis=float(np.max(np.abs(kurtosis))),
+            mean_kurtosis=float(jnp.mean(jnp.abs(kurtosis))),
+            mean_multimodal=float(jnp.mean(multimodal)),
+            max_kurtosis=float(jnp.max(jnp.abs(kurtosis))),
         )
 
     def detect_all(
@@ -449,20 +465,21 @@ class PerWeightNonGaussianityDetector:
 
 
 # ----------------------------
-# Sinkhorn Weight Correction
+# Sinkhorn Weight Correction (JAX-accelerated)
 # ----------------------------
 
 
 def compute_sinkhorn_weight_correction(
-    gradient: np.ndarray,
-    non_gaussian_mask: np.ndarray,
+    gradient: ArrayType,
+    non_gaussian_mask: ArrayType,
     config: PerWeightCausalConfig,
-) -> np.ndarray:
+) -> ArrayType:
     """
     Compute Sinkhorn-based correction for non-Gaussian weights.
 
     For weights flagged as non-Gaussian, applies transport-based correction
-    to move gradient distribution towards Gaussian.
+    to move gradient distribution towards Gaussian. Uses JAX for efficient
+    computation when available.
 
     Args:
         gradient: Current gradient array
@@ -472,11 +489,12 @@ def compute_sinkhorn_weight_correction(
     Returns:
         Corrected gradient array
     """
-    gradient = np.asarray(gradient, dtype=np.float64)
-    mask = np.asarray(non_gaussian_mask, dtype=np.float64)
+    gradient = jnp.asarray(gradient, dtype=jnp.float32)
+    mask = jnp.asarray(non_gaussian_mask, dtype=jnp.float32)
+    original_shape = gradient.shape
 
     # If no weights need correction, return original
-    if np.max(mask) < 1e-6:
+    if jnp.max(mask) < 1e-6:
         return gradient
 
     # Flatten for processing
@@ -486,20 +504,17 @@ def compute_sinkhorn_weight_correction(
     # Identify weights that need correction
     needs_correction = flat_mask > 0.1
 
-    if not np.any(needs_correction):
+    if not jnp.any(needs_correction):
         return gradient
 
-    # Apply Sinkhorn correction to flagged weights
-    corrected = flat_grad.copy()
-
     # Get indices of weights needing correction
-    idx_correct = np.where(needs_correction)[0]
+    idx_correct = jnp.where(needs_correction)[0]
 
     if len(idx_correct) >= 2:
         # Get gradients for these weights
         grads_to_correct = flat_grad[idx_correct]
 
-        # Apply 1D Sinkhorn correction
+        # Apply 1D Sinkhorn correction (already JAX-accelerated)
         corrected_grads = sinkhorn_1d_correction(
             grads_to_correct,
             eps=config.sb_sinkhorn_eps,
@@ -509,11 +524,18 @@ def compute_sinkhorn_weight_correction(
         # Blend based on mask values
         blend_factors = flat_mask[idx_correct] * config.sb_correction_strength
 
-        corrected[idx_correct] = (1 - blend_factors) * flat_grad[
-            idx_correct
-        ] + blend_factors * corrected_grads
+        # Compute blended correction
+        blended = (
+            1 - blend_factors
+        ) * grads_to_correct + blend_factors * corrected_grads
 
-    return corrected.reshape(gradient.shape)
+        # Update the corrected values at the indices
+        # Use JAX's functional update pattern
+        corrected = flat_grad.at[idx_correct].set(blended)
+    else:
+        corrected = flat_grad
+
+    return corrected.reshape(original_shape)
 
 
 # ----------------------------
