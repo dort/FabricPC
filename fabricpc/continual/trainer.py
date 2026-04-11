@@ -83,29 +83,42 @@ class InterleavedLoader:
         return len(self.current_loader)
 
     def __iter__(self):
-        for current_images, current_labels in self.current_loader:
-            if self.has_replay and self.replay_batch_size > 0:
-                # Get replay samples
-                replay_data = self.replay_buffer.sample(
-                    batch_size=self.replay_batch_size,
-                    exclude_task=self.current_task_id,
+        replay_epoch = None
+        if self.has_replay and self.replay_batch_size > 0:
+            replay_epoch = self.replay_buffer.sample_batches(
+                num_batches=len(self.current_loader),
+                batch_size=self.replay_batch_size,
+                exclude_task=self.current_task_id,
+            )
+
+        for batch_idx, (current_images, current_labels) in enumerate(
+            self.current_loader
+        ):
+            if replay_epoch is not None:
+                replay_images, replay_labels = replay_epoch
+                replay_batch_images = replay_images[batch_idx]
+                replay_batch_labels = replay_labels[batch_idx]
+
+                combined_size = len(current_images) + len(replay_batch_images)
+                combined_images = np.empty(
+                    (combined_size,) + current_images.shape[1:],
+                    dtype=current_images.dtype,
+                )
+                combined_labels = np.empty(
+                    (combined_size,) + current_labels.shape[1:],
+                    dtype=current_labels.dtype,
                 )
 
-                if replay_data is not None:
-                    replay_images, replay_labels = replay_data
+                perm = np.random.permutation(combined_size)
+                current_slots = perm[: len(current_images)]
+                replay_slots = perm[len(current_images) :]
+                combined_images[current_slots] = current_images
+                combined_images[replay_slots] = replay_batch_images
+                combined_labels[current_slots] = current_labels
+                combined_labels[replay_slots] = replay_batch_labels
 
-                    # Concatenate current and replay batches
-                    combined_images = np.concatenate(
-                        [current_images, replay_images], axis=0
-                    )
-                    combined_labels = np.concatenate(
-                        [current_labels, replay_labels], axis=0
-                    )
-
-                    # Shuffle the combined batch
-                    perm = np.random.permutation(len(combined_images))
-                    yield combined_images[perm], combined_labels[perm]
-                    continue
+                yield combined_images, combined_labels
+                continue
 
             # No replay available, just yield current batch
             yield current_images, current_labels

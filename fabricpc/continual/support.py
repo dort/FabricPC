@@ -1215,6 +1215,82 @@ class ReplayBuffer:
             sampled_labels, axis=0
         )
 
+    def sample_batches(
+        self,
+        num_batches: int,
+        batch_size: int,
+        exclude_task: Optional[int] = None,
+    ) -> Optional[Tuple[np.ndarray, np.ndarray]]:
+        """
+        Sample many replay batches at once.
+
+        Produces a dense batch matrix so interleaved training can prepare an
+        epoch's replay samples in one vectorized step instead of sampling once
+        per batch from Python.
+
+        Args:
+            num_batches: Number of replay batches to sample
+            batch_size: Samples per replay batch
+            exclude_task: Task ID to exclude
+
+        Returns:
+            Tuple of (images, labels) with leading shape
+            (num_batches, actual_batch_size, ...) or None if buffer is empty
+        """
+        if num_batches <= 0 or batch_size <= 0:
+            return None
+
+        task_ids = np.array(
+            [task_id for task_id in self._buffers.keys() if task_id != exclude_task],
+            dtype=np.int32,
+        )
+        if task_ids.size == 0:
+            return None
+
+        counts = np.array(
+            [self._counts[task_id] for task_id in task_ids], dtype=np.int32
+        )
+        total_count = int(np.sum(counts))
+        if total_count == 0:
+            return None
+
+        actual_batch_size = min(batch_size, total_count)
+        random_scores = np.random.random((num_batches, total_count))
+        global_indices = np.argpartition(
+            random_scores, kth=actual_batch_size - 1, axis=1
+        )[:, :actual_batch_size]
+        chosen_scores = np.take_along_axis(random_scores, global_indices, axis=1)
+        row_order = np.argsort(chosen_scores, axis=1)
+        global_indices = np.take_along_axis(global_indices, row_order, axis=1)
+
+        cumulative = np.cumsum(counts)
+        flat_indices = global_indices.reshape(-1)
+        task_positions = np.searchsorted(cumulative, flat_indices, side="right")
+        starts = cumulative - counts
+        local_indices = flat_indices - starts[task_positions]
+
+        first_task_id = int(task_ids[0])
+        example_images, example_labels = self._buffers[first_task_id]
+        images_shape = (num_batches, actual_batch_size) + example_images.shape[1:]
+        labels_shape = (num_batches, actual_batch_size) + example_labels.shape[1:]
+        sampled_images = np.empty(images_shape, dtype=example_images.dtype)
+        sampled_labels = np.empty(labels_shape, dtype=example_labels.dtype)
+
+        batch_rows = np.repeat(np.arange(num_batches), actual_batch_size)
+        batch_cols = np.tile(np.arange(actual_batch_size), num_batches)
+        for task_pos in np.unique(task_positions):
+            mask = task_positions == task_pos
+            task_id = int(task_ids[int(task_pos)])
+            task_images, task_labels = self._buffers[task_id]
+            sampled_images[batch_rows[mask], batch_cols[mask]] = task_images[
+                local_indices[mask]
+            ]
+            sampled_labels[batch_rows[mask], batch_cols[mask]] = task_labels[
+                local_indices[mask]
+            ]
+
+        return sampled_images, sampled_labels
+
     def sample_by_task(
         self,
         samples_per_task: int,
