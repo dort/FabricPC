@@ -3,9 +3,11 @@ from types import SimpleNamespace
 import numpy as np
 
 import fabricpc.continual.trainer as trainer_module
+from fabricpc.continual.causal import AgreementTracker
 from fabricpc.continual.support import (
     DemotionBank,
     HybridSelectorPolicy,
+    ReplayBuffer,
     SupportBank,
 )
 
@@ -139,3 +141,48 @@ def test_support_swap_audit_vectorized_generation(monkeypatch):
         np.testing.assert_allclose(
             row["combined_gain"], row["current_gain"] + 0.5 * row["old_gain"]
         )
+
+
+def test_replay_buffer_sample_without_global_concatenation_regression():
+    buffer = ReplayBuffer(max_samples_per_task=10, max_total_samples=20)
+    images_a = np.arange(12, dtype=np.float32).reshape(6, 2)
+    labels_a = np.arange(6, dtype=np.int32)
+    images_b = np.arange(20, 32, dtype=np.float32).reshape(6, 2)
+    labels_b = np.arange(10, 16, dtype=np.int32)
+
+    buffer.add_task_samples(0, images_a, labels_a, replace=True)
+    buffer.add_task_samples(1, images_b, labels_b, replace=True)
+
+    np.random.seed(0)
+    sample = buffer.sample(batch_size=5, exclude_task=1)
+    assert sample is not None
+    sampled_images, sampled_labels = sample
+    assert sampled_images.shape[0] == 5
+    assert sampled_labels.shape[0] == 5
+    assert np.all(np.isin(sampled_labels, labels_a))
+
+
+def test_agreement_tracker_array_backed_matching_and_state_roundtrip():
+    tracker = AgreementTracker(max_history=6)
+
+    for task_id, col_idx, pred, gain in [
+        (0, 2, 0.2, 0.1),
+        (0, 3, 0.5, 0.4),
+        (1, 2, 0.7, 0.6),
+        (1, 4, 0.1, 0.2),
+    ]:
+        tracker.record_prediction(task_id, col_idx, pred, "challenger")
+        tracker.record_outcome(task_id, col_idx, gain)
+
+    agreement, matched = tracker.compute_recent_agreement(window=10)
+    assert matched == 4
+    assert 0.5 <= agreement <= 1.0
+    assert len(tracker.predictions) == 4
+    assert len(tracker.outcomes) == 4
+
+    state = tracker.save_state()
+    restored = AgreementTracker(max_history=6)
+    restored.load_state(state)
+    restored_agreement, restored_matched = restored.compute_recent_agreement(window=10)
+    assert restored_matched == matched
+    np.testing.assert_allclose(restored_agreement, agreement)

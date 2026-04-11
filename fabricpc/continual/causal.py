@@ -692,6 +692,77 @@ class AgreementTracker:
     predictions: List[Dict[str, Any]] = field(default_factory=list)
     outcomes: List[Dict[str, Any]] = field(default_factory=list)
     recent_agreements: List[float] = field(default_factory=list)
+    _pred_task_ids: Optional[np.ndarray] = field(default=None, init=False, repr=False)
+    _pred_column_ids: Optional[np.ndarray] = field(default=None, init=False, repr=False)
+    _pred_scores: Optional[np.ndarray] = field(default=None, init=False, repr=False)
+    _pred_role_codes: Optional[np.ndarray] = field(default=None, init=False, repr=False)
+    _pred_size: int = field(default=0, init=False, repr=False)
+    _pred_pos: int = field(default=0, init=False, repr=False)
+    _out_task_ids: Optional[np.ndarray] = field(default=None, init=False, repr=False)
+    _out_column_ids: Optional[np.ndarray] = field(default=None, init=False, repr=False)
+    _out_gains: Optional[np.ndarray] = field(default=None, init=False, repr=False)
+    _out_size: int = field(default=0, init=False, repr=False)
+    _out_pos: int = field(default=0, init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        self._allocate_buffers()
+
+    def _capacity(self) -> int:
+        return max(1, self.max_history * 2)
+
+    def _allocate_buffers(self) -> None:
+        cap = self._capacity()
+        self._pred_task_ids = np.zeros(cap, dtype=np.int32)
+        self._pred_column_ids = np.zeros(cap, dtype=np.int32)
+        self._pred_scores = np.zeros(cap, dtype=np.float64)
+        self._pred_role_codes = np.zeros(cap, dtype=np.int8)
+        self._out_task_ids = np.zeros(cap, dtype=np.int32)
+        self._out_column_ids = np.zeros(cap, dtype=np.int32)
+        self._out_gains = np.zeros(cap, dtype=np.float64)
+        self._pred_size = 0
+        self._pred_pos = 0
+        self._out_size = 0
+        self._out_pos = 0
+
+    @staticmethod
+    def _role_to_code(role: str) -> int:
+        return {"reuse": 0, "diverse": 1, "challenger": 2}.get(role, -1)
+
+    @staticmethod
+    def _code_to_role(code: int) -> str:
+        return {0: "reuse", 1: "diverse", 2: "challenger"}.get(code, "unknown")
+
+    @staticmethod
+    def _ordered_ring(arr: np.ndarray, size: int, pos: int) -> np.ndarray:
+        if size == 0:
+            return arr[:0]
+        if size < arr.shape[0]:
+            return arr[:size].copy()
+        return np.concatenate([arr[pos:], arr[:pos]], axis=0)
+
+    def _prediction_arrays(
+        self,
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        assert self._pred_task_ids is not None
+        assert self._pred_column_ids is not None
+        assert self._pred_scores is not None
+        assert self._pred_role_codes is not None
+        return (
+            self._ordered_ring(self._pred_task_ids, self._pred_size, self._pred_pos),
+            self._ordered_ring(self._pred_column_ids, self._pred_size, self._pred_pos),
+            self._ordered_ring(self._pred_scores, self._pred_size, self._pred_pos),
+            self._ordered_ring(self._pred_role_codes, self._pred_size, self._pred_pos),
+        )
+
+    def _outcome_arrays(self) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        assert self._out_task_ids is not None
+        assert self._out_column_ids is not None
+        assert self._out_gains is not None
+        return (
+            self._ordered_ring(self._out_task_ids, self._out_size, self._out_pos),
+            self._ordered_ring(self._out_column_ids, self._out_size, self._out_pos),
+            self._ordered_ring(self._out_gains, self._out_size, self._out_pos),
+        )
 
     def record_prediction(
         self,
@@ -701,6 +772,10 @@ class AgreementTracker:
         role: str = "challenger",
     ) -> None:
         """Record a predictor's score for a column."""
+        assert self._pred_task_ids is not None
+        assert self._pred_column_ids is not None
+        assert self._pred_scores is not None
+        assert self._pred_role_codes is not None
         self.predictions.append(
             {
                 "task_id": task_id,
@@ -709,9 +784,23 @@ class AgreementTracker:
                 "role": role,
             }
         )
-        # Trim old predictions
-        if len(self.predictions) > self.max_history * 2:
+        if len(self.predictions) > self.max_history:
             self.predictions = self.predictions[-self.max_history :]
+        self._pred_task_ids[self._pred_pos] = task_id
+        self._pred_column_ids[self._pred_pos] = column_idx
+        self._pred_scores[self._pred_pos] = predicted_score
+        self._pred_role_codes[self._pred_pos] = self._role_to_code(role)
+        self._pred_pos = (self._pred_pos + 1) % self._capacity()
+        self._pred_size = min(self._pred_size + 1, self._capacity())
+        if self._pred_size > self.max_history:
+            task_ids, col_ids, scores, role_codes = self._prediction_arrays()
+            keep = self.max_history
+            self._pred_task_ids[:keep] = task_ids[-keep:]
+            self._pred_column_ids[:keep] = col_ids[-keep:]
+            self._pred_scores[:keep] = scores[-keep:]
+            self._pred_role_codes[:keep] = role_codes[-keep:]
+            self._pred_size = keep
+            self._pred_pos = keep % self._capacity()
 
     def record_outcome(
         self,
@@ -720,6 +809,9 @@ class AgreementTracker:
         actual_gain: float,
     ) -> None:
         """Record actual outcome for a column from audit."""
+        assert self._out_task_ids is not None
+        assert self._out_column_ids is not None
+        assert self._out_gains is not None
         self.outcomes.append(
             {
                 "task_id": task_id,
@@ -727,9 +819,21 @@ class AgreementTracker:
                 "actual_gain": actual_gain,
             }
         )
-        # Trim old outcomes
-        if len(self.outcomes) > self.max_history * 2:
+        if len(self.outcomes) > self.max_history:
             self.outcomes = self.outcomes[-self.max_history :]
+        self._out_task_ids[self._out_pos] = task_id
+        self._out_column_ids[self._out_pos] = column_idx
+        self._out_gains[self._out_pos] = actual_gain
+        self._out_pos = (self._out_pos + 1) % self._capacity()
+        self._out_size = min(self._out_size + 1, self._capacity())
+        if self._out_size > self.max_history:
+            task_ids, col_ids, gains = self._outcome_arrays()
+            keep = self.max_history
+            self._out_task_ids[:keep] = task_ids[-keep:]
+            self._out_column_ids[:keep] = col_ids[-keep:]
+            self._out_gains[:keep] = gains[-keep:]
+            self._out_size = keep
+            self._out_pos = keep % self._capacity()
 
     def compute_recent_agreement(self, window: int = 20) -> Tuple[float, int]:
         """
@@ -741,28 +845,42 @@ class AgreementTracker:
         Returns:
             Tuple of (agreement_rate, num_matched_pairs)
         """
-        # Build lookup for recent outcomes
-        outcome_lookup = {}
-        for o in self.outcomes[-self.max_history :]:
-            key = (o["task_id"], o["column_idx"])
-            outcome_lookup[key] = o["actual_gain"]
+        pred_task_ids, pred_col_ids, pred_scores, _ = self._prediction_arrays()
+        out_task_ids, out_col_ids, out_gains = self._outcome_arrays()
 
-        # Match predictions with outcomes
-        matched_pred = []
-        matched_actual = []
+        if pred_scores.size == 0 or out_gains.size == 0:
+            return 0.0, 0
 
-        for p in self.predictions[-self.max_history :]:
-            key = (p["task_id"], p["column_idx"])
-            if key in outcome_lookup:
-                matched_pred.append(p["predicted_score"])
-                matched_actual.append(outcome_lookup[key])
+        pred_task_ids = pred_task_ids[-self.max_history :]
+        pred_col_ids = pred_col_ids[-self.max_history :]
+        pred_scores = pred_scores[-self.max_history :]
+        out_task_ids = out_task_ids[-self.max_history :]
+        out_col_ids = out_col_ids[-self.max_history :]
+        out_gains = out_gains[-self.max_history :]
+
+        pred_keys = np.rec.fromarrays([pred_task_ids, pred_col_ids], names="task,col")
+        out_keys = np.rec.fromarrays([out_task_ids, out_col_ids], names="task,col")
+        order = np.argsort(out_keys, kind="mergesort")
+        sorted_out_keys = out_keys[order]
+        positions = np.searchsorted(sorted_out_keys, pred_keys)
+        valid = positions < sorted_out_keys.shape[0]
+        valid &= (
+            sorted_out_keys[np.clip(positions, 0, sorted_out_keys.shape[0] - 1)]
+            == pred_keys
+        )
+
+        if not np.any(valid):
+            return 0.0, 0
+
+        matched_pred = pred_scores[valid][-window:]
+        matched_actual = out_gains[order][positions[valid]][-window:]
 
         if len(matched_pred) < 4:
             return 0.0, len(matched_pred)
 
         # Compute correlation as agreement measure
-        pred_arr = np.array(matched_pred[-window:])
-        actual_arr = np.array(matched_actual[-window:])
+        pred_arr = np.asarray(matched_pred, dtype=np.float64)
+        actual_arr = np.asarray(matched_actual, dtype=np.float64)
 
         # Normalize to avoid scale issues
         pred_std = np.std(pred_arr)
@@ -799,19 +917,56 @@ class AgreementTracker:
 
     def save_state(self) -> Dict[str, Any]:
         """Serialize for checkpointing."""
+        pred_task_ids, pred_col_ids, pred_scores, pred_role_codes = (
+            self._prediction_arrays()
+        )
+        out_task_ids, out_col_ids, out_gains = self._outcome_arrays()
         return {
             "max_history": self.max_history,
-            "predictions": list(self.predictions),
-            "outcomes": list(self.outcomes),
+            "predictions": [
+                {
+                    "task_id": int(task_id),
+                    "column_idx": int(column_idx),
+                    "predicted_score": float(score),
+                    "role": self._code_to_role(int(role_code)),
+                }
+                for task_id, column_idx, score, role_code in zip(
+                    pred_task_ids, pred_col_ids, pred_scores, pred_role_codes
+                )
+            ],
+            "outcomes": [
+                {
+                    "task_id": int(task_id),
+                    "column_idx": int(column_idx),
+                    "actual_gain": float(gain),
+                }
+                for task_id, column_idx, gain in zip(
+                    out_task_ids, out_col_ids, out_gains
+                )
+            ],
             "recent_agreements": list(self.recent_agreements),
         }
 
     def load_state(self, state: Dict[str, Any]) -> None:
         """Restore from checkpoint."""
         self.max_history = state.get("max_history", 100)
-        self.predictions = list(state.get("predictions", []))
-        self.outcomes = list(state.get("outcomes", []))
+        self._allocate_buffers()
+        self.predictions = []
+        self.outcomes = []
         self.recent_agreements = list(state.get("recent_agreements", []))
+        for pred in state.get("predictions", []):
+            self.record_prediction(
+                pred["task_id"],
+                pred["column_idx"],
+                pred["predicted_score"],
+                pred.get("role", "challenger"),
+            )
+        for outcome in state.get("outcomes", []):
+            self.record_outcome(
+                outcome["task_id"],
+                outcome["column_idx"],
+                outcome["actual_gain"],
+            )
 
 
 @dataclass

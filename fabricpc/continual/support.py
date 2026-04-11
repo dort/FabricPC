@@ -1178,31 +1178,42 @@ class ReplayBuffer:
         Returns:
             Tuple of (images, labels) or None if buffer is empty
         """
-        # Get available tasks
-        available_tasks = [t for t in self._buffers.keys() if t != exclude_task]
-
-        if not available_tasks:
+        task_ids = np.array(
+            [task_id for task_id in self._buffers.keys() if task_id != exclude_task],
+            dtype=np.int32,
+        )
+        if task_ids.size == 0:
             return None
 
-        # Collect all samples from available tasks
-        all_imgs = []
-        all_labels = []
-        for task_id in available_tasks:
+        counts = np.array(
+            [self._counts[task_id] for task_id in task_ids], dtype=np.int32
+        )
+        total_count = int(np.sum(counts))
+        if total_count == 0:
+            return None
+
+        actual_batch_size = min(batch_size, total_count)
+        global_indices = np.random.choice(
+            total_count, size=actual_batch_size, replace=False
+        )
+        cumulative = np.cumsum(counts)
+        task_positions = np.searchsorted(cumulative, global_indices, side="right")
+        starts = cumulative - counts
+        local_indices = global_indices - starts[task_positions]
+
+        sampled_imgs = []
+        sampled_labels = []
+        for task_pos in np.unique(task_positions):
+            mask = task_positions == task_pos
+            task_id = int(task_ids[task_pos])
             imgs, labels = self._buffers[task_id]
-            all_imgs.append(imgs)
-            all_labels.append(labels)
+            task_local_indices = local_indices[mask]
+            sampled_imgs.append(imgs[task_local_indices])
+            sampled_labels.append(labels[task_local_indices])
 
-        all_imgs = np.concatenate(all_imgs, axis=0)
-        all_labels = np.concatenate(all_labels, axis=0)
-
-        if len(all_imgs) == 0:
-            return None
-
-        # Sample batch
-        actual_batch_size = min(batch_size, len(all_imgs))
-        indices = np.random.choice(len(all_imgs), size=actual_batch_size, replace=False)
-
-        return all_imgs[indices], all_labels[indices]
+        return np.concatenate(sampled_imgs, axis=0), np.concatenate(
+            sampled_labels, axis=0
+        )
 
     def sample_by_task(
         self,
