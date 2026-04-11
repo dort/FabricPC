@@ -9,7 +9,7 @@ This document summarizes the `FabricPC` repository after reviewing:
 - `v_20_b_vs_v_18.pdf`
 - the code under `FabricPC/`
 
-The two notebooks were readable directly and show a Colab-centric, monolithic Split-MNIST continual-learning stack with generated module layers, replay-bank support search, causal guidance, typing/demotion logic, and later V20.2b conservative calibration of replay-bank, route, SB, and TransWeave mechanisms. The PDF could not be machine-extracted with the local shell tools available in this session, so the comparison details below are grounded primarily in the notebooks themselves and the corresponding ported module docstrings and config comments inside `FabricPC`.
+The two notebooks were readable directly and show a Colab-centric, monolithic Split-MNIST continual-learning stack with generated module layers, replay-bank support search, causal guidance, typing/demotion logic, and later V20.2b conservative calibration of replay-bank, route, SB, and TransWeave mechanisms. The PDF was also extracted and read, and it confirms the high-level interpretation of the later branch as a replay-backed, exact-verified, anti-overwrite-calibrated control layer built around the V18 backbone.
 
 ## Executive Summary
 
@@ -20,7 +20,7 @@ The two notebooks were readable directly and show a Colab-centric, monolithic Sp
 
 This is the right direction architecturally. The repository is substantially more maintainable than the source notebooks because the core graph mechanics, node abstractions, state initialization, training loops, continual-learning heuristics, and experiments are separated cleanly.
 
-The implementation is also in good working order from a regression perspective: `154` tests passed locally.
+The implementation is also in good working order from a regression perspective: `154` tests passed locally. In addition, the shipped `split_mnist_continual.py` and `split_mnist_causal.py` examples both ran successfully in quick-smoke mode once MNIST was available locally.
 
 ## What The Source Notebooks Contained
 
@@ -36,6 +36,26 @@ The source notebooks are large Colab runtimes that:
 - introduce conservative V20.2b calibration so new mechanisms remain helpful without overwhelming long-horizon continual learning
 
 The `V20.2b additions` markdown in the newer notebook makes the main intent explicit: keep the runtime scaffold, but apply replay-bank support, routing, SB, and TransWeave more conservatively and gate them by evidence.
+
+## What The PDF Adds
+
+The PDF is implementation-oriented and makes the V18 to V20.2b transition much clearer.
+
+Its central claim is:
+
+- V18 is an exact-teacher continual-learning system with exact boundary-time support search, controller rollout search, and one-swap maintenance.
+- V20.2b keeps that backbone, but adds replay-backed online support proposals wrapped in conservative exact verification and anti-overwrite safeguards.
+
+The most important changes highlighted in the PDF are:
+
+- persistent selector state rather than mostly self-contained per-run state
+- replay bank as a live support proposer rather than only an offline artifact
+- conservative reselection against both the original chosen support and a local refinement baseline
+- strong preference for high-overlap, local support repairs over radical support jumps
+- task-history-aware anti-overwrite control
+- muted but nonzero use of internal certificates near safe candidate regions
+
+This PDF framing matches the structure of the port well. The key ported idea is not merely “more heuristics.” It is a new control regime around the V18 scaffold: replay may propose, but exact continual-learning-aware checks still decide.
 
 ## How FabricPC Is Organized
 
@@ -112,6 +132,60 @@ Main modules:
 
 This package is the clearest port of the V18/V20 notebook family into maintainable code. Several docstrings explicitly call out that they were ported from the `mnist_audit_guided_generality` notebooks.
 
+## What The Shipped Examples Actually Exercise
+
+I ran:
+
+- `examples/split_mnist_continual.py --quick-smoke`
+- `examples/split_mnist_causal.py --quick-smoke --num-tasks 3`
+
+These runs are useful because they show what parts of the codebase are actually wired into a working end-to-end path today.
+
+### Common runtime observations
+
+- Both scripts build a simple 4-node feedforward graph: input -> hidden1 -> hidden2 -> output.
+- They do not instantiate the richer column/composer notebook-style architecture directly.
+- They do exercise the continual-learning infrastructure around that graph:
+  - support selection
+  - replay
+  - audit row generation
+  - causal predictor / trust logic
+  - TransWeave bookkeeping
+- Both scripts request `jax_platforms="cuda"`, but in this environment JAX could not initialize CUDA and fell back to CPU.
+- Both required MNIST to be downloaded once through Keras before training could start.
+
+### `split_mnist_continual.py` smoke run
+
+Observed behavior:
+
+- 5 tasks completed successfully
+- mean test accuracy was about `0.9879`
+- average forgetting was about `0.0748`
+- replay activated after task 0 and grew from 500 to 2000 buffered samples
+- the selected support columns remained `(0, 1, 6, 7)` throughout this smoke run
+- causal examples accumulated, but `mix_gate` remained `0.0`, so causal guidance was effectively not steering support choice in that run
+- TransWeave bookkeeping was active:
+  - nonzero composer sources appeared from task 1 onward
+  - shell demotions were recorded on later tasks
+
+Artifacts were written under:
+
+- `results/split_mnist/split_mnist_seed42_20260411_155447`
+
+### `split_mnist_causal.py` smoke run
+
+Observed behavior:
+
+- 3 tasks completed successfully
+- final mean accuracy across seen tasks was about `0.9556`
+- average forgetting was about `0.0574`
+- causal logic became visibly active by tasks 1 and 2
+- `mix_gate` rose from `0.0` on task 0 to `0.2711` and then `0.3500`
+- the causal predictor trained on audit rows and reported nonzero correlation by task 2
+- the support columns in this run stayed `(0, 1, 2, 3)`
+
+The causal example is therefore a better proof than the plain continual example that the V20-style support-guidance layer is actually live in the current codebase.
+
 ## Mapping From Notebook Ideas To Repository Modules
 
 ### Predictive-coding runtime
@@ -151,6 +225,8 @@ Notebook concept:
 FabricPC port:
 - `fabricpc/continual/support.py`
 - `fabricpc/continual/config.py`
+
+The PDF clarifies that this should be thought of as a support-proposal and conservative reselection pipeline, not just a selector utility.
 
 ### Causal guidance from support-swap audit data
 
@@ -213,6 +289,8 @@ For the continual-learning path:
 
 This is essentially the notebook workflow, but broken into composable modules.
 
+The example runs confirm that this flow is not just theoretical. In the current repository, the support-selection, replay, audit, causal-update, and TransWeave bookkeeping path is all active in end-to-end execution.
+
 ## What Looks Well-Ported
 
 - The predictive-coding engine is cleanly separated from the Split-MNIST experiment logic.
@@ -220,14 +298,17 @@ This is essentially the notebook workflow, but broken into composable modules.
 - Predictive coding and backprop use the same model description, which makes baseline comparison easy.
 - The continual-learning code preserves the notebook vocabulary instead of losing the research intent during refactoring.
 - The repository includes broad test coverage across core mechanics, continual features, transformers, multi-GPU, initializers, and optimizers.
+- The PDF’s framing of V20.2b as “replay proposes, exact audit judges” matches the actual shape of the `continual` package.
+- The quick-smoke examples confirm that the continual infrastructure is operational rather than just partially ported scaffolding.
 
 ## Important Limitations In The Current Port
 
 These are not fatal problems, but they matter when interpreting the code.
 
 - Much of the continual-learning layer is still heuristic and Python-driven rather than JAX-native.
-- The examples that exercise continual learning mostly use simple feedforward `Linear` graphs, while the richer notebook architecture is represented more as support infrastructure and custom nodes than as one canonical end-to-end model.
+- The examples that exercise continual learning mostly use simple feedforward `Linear` graphs, while the richer notebook architecture described in the notebooks and PDF is represented more as support infrastructure and custom nodes than as one canonical end-to-end model.
 - The port favors maintainability over exact notebook equivalence, so it should be treated as a research implementation inspired by the notebook family rather than a byte-for-byte reproduction.
+- The smoke runs suggest that some mechanisms are present but muted under default quick-smoke settings. For example, the plain continual example accumulated causal data but never raised `mix_gate` above zero, so the causal layer did not materially influence support choice there.
 
 ## Improvement Opportunities
 
@@ -291,6 +372,8 @@ Expected benefit:
 - clearer scientific reproducibility
 - easier diagnosis of LLM-port drift
 
+This is now more important, not less, after running the examples. The shipped examples work, but they validate the control stack around a simple feedforward graph rather than validating notebook-style architectural parity.
+
 ### 5. Use `node_order` consistently, and specialize inference for acyclic graphs
 
 Several core loops iterate over `structure.nodes` directly instead of using `structure.node_order`. Because dict insertion order is stable in modern Python, this is usually fine, but the explicit topological order already exists and should be the default traversal path for acyclic graphs.
@@ -341,10 +424,30 @@ Local test result:
 
 - `154 passed in 76.18s`
 
+Local example result:
+
+- `examples/split_mnist_continual.py --quick-smoke` completed successfully on CPU after MNIST download
+- `examples/split_mnist_causal.py --quick-smoke --num-tasks 3` completed successfully on CPU after MNIST download
+
+Runtime caveats observed:
+
+- the examples currently hard-request CUDA and then fall back to CPU if CUDA init fails
+- plot export failed because Kaleido requires Chrome
+- MNIST loading depends on a successful initial download unless the dataset is already cached locally
+
 That gives good confidence that the repository is internally consistent, even though it does not by itself prove exact parity with the original notebooks.
 
 ## Bottom Line
 
 `FabricPC` is a credible and useful refactoring of the notebook research code into a maintainable package. The strongest part of the port is the general JAX predictive-coding engine; the most notebook-specific part is the `fabricpc.continual` package, which preserves the support-bank, causal, and TransWeave ideas in a cleaner form.
 
-The biggest remaining opportunity is performance: the core model mechanics are JAX-native, but a meaningful portion of the continual-learning logic is still Python/NumPy orchestration inherited in spirit from the notebook workflow. Moving those hot paths into batched JAX code, and then measuring parity against representative notebook settings, would improve both speed and confidence substantially.
+The PDF and example runs make the current status more precise:
+
+- the repository does implement the V20.2b-style control story
+- the shipped examples do exercise that control stack successfully
+- but the most visible end-to-end examples still sit on top of a relatively simple feedforward graph rather than a canonical notebook-style columnar architecture
+
+The biggest remaining opportunity is therefore twofold:
+
+- performance: move more continual-learning hot paths out of Python/NumPy and into batched JAX code
+- parity: create a canonical full-stack continual-learning example and benchmark that more directly expresses the architecture described in the notebooks and PDF
