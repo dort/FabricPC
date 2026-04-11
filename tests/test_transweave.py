@@ -10,11 +10,14 @@ Tests the core components:
 
 import numpy as np
 import pytest
+from types import SimpleNamespace
 
 from fabricpc.continual.config import (
     ComposerTransWeaveConfig,
     ShellDemotionTransWeaveConfig,
+    TransitionAutotuneConfig,
 )
+import fabricpc.continual.trainer as trainer_module
 from fabricpc.continual.transweave import (
     sinkhorn_transport,
     cosine_cost_matrix,
@@ -276,6 +279,134 @@ class TestComposerTransWeave:
         composer_tw2.load_state(state)
 
         assert 0 in composer_tw2.task_representations
+
+
+def test_transition_autotune_updates_shell_thresholds():
+    trainer = trainer_module.SequentialTrainer.__new__(trainer_module.SequentialTrainer)
+    trainer.config = SimpleNamespace(
+        transition_autotune=TransitionAutotuneConfig(
+            enable=True,
+            rollout_batches=1,
+            max_columns_to_check=3,
+            demotion_threshold_candidates=(0.05, 0.10, 0.20),
+            promotion_threshold_candidates=(0.25, 0.35),
+            max_demotions_per_step_candidates=(1, 2),
+            target_demotions_per_column=1.0,
+            target_promotions_per_column=0.0,
+            transport_cost_weight=0.0,
+            entropy_weight=0.0,
+            config_distance_weight=0.01,
+        ),
+        shell_demotion_transweave=ShellDemotionTransWeaveConfig(
+            demotion_threshold=0.10,
+            promotion_threshold=0.25,
+            max_demotions_per_step=2,
+            shell_sizes=(2, 2, 2),
+        ),
+        columns=SimpleNamespace(num_columns=4),
+    )
+    trainer._column_usage_history = {0: [0], 1: [0], 2: [0]}
+    trainer._last_transition_autotune = {}
+    trainer._transition_autotune_history = []
+    trainer.support_manager = SimpleNamespace(
+        support_bank=SimpleNamespace(
+            get_mean_accuracy_by_column=lambda num_columns: np.zeros(num_columns)
+        )
+    )
+
+    class FakeShellTransWeave:
+        def __init__(self, config):
+            self.config = config
+            self.column_histories = {0: [object()], 1: [object()], 2: [object()]}
+
+        def compute_demotion_transport(
+            self, column_id, current_activities, current_assignments
+        ):
+            demotions = []
+            promotions = []
+            if self.config.demotion_threshold <= 0.10:
+                demotions = [(0, 0, 1)] * self.config.max_demotions_per_step
+            if self.config.promotion_threshold < 0.30:
+                promotions = [(1, 1, 0)] * self.config.max_demotions_per_step
+            return SimpleNamespace(
+                demotion_candidates=demotions,
+                promotion_candidates=promotions,
+                diagnostics={
+                    "transport_cost": 1.0,
+                    "shell_transition_entropy": 0.5,
+                },
+            )
+
+    trainer.transweave_manager = SimpleNamespace(
+        shell_transweave=FakeShellTransWeave(trainer.config.shell_demotion_transweave)
+    )
+
+    task_data = SimpleNamespace(
+        task_id=1,
+        train_loader=SimpleNamespace(
+            images=np.ones((4, 3), dtype=np.float32),
+            batch_size=2,
+        ),
+    )
+
+    result = trainer_module.SequentialTrainer._autotune_transition_thresholds(
+        trainer,
+        task_data=task_data,
+        active_cols=(0, 1),
+        verbose=False,
+    )
+
+    assert result["demotion_threshold"] == pytest.approx(0.10)
+    assert result["promotion_threshold"] == pytest.approx(0.35)
+    assert result["max_demotions_per_step"] == 1
+    assert trainer.config.shell_demotion_transweave.demotion_threshold == pytest.approx(
+        0.10
+    )
+    assert (
+        trainer.config.shell_demotion_transweave.promotion_threshold
+        == pytest.approx(0.35)
+    )
+    assert trainer._transition_autotune_history
+
+
+def test_transition_autotune_skips_without_history():
+    trainer = trainer_module.SequentialTrainer.__new__(trainer_module.SequentialTrainer)
+    trainer.config = SimpleNamespace(
+        transition_autotune=TransitionAutotuneConfig(enable=True),
+        shell_demotion_transweave=ShellDemotionTransWeaveConfig(),
+        columns=SimpleNamespace(num_columns=4),
+    )
+    trainer._column_usage_history = {}
+    trainer._last_transition_autotune = {}
+    trainer._transition_autotune_history = []
+    trainer.support_manager = SimpleNamespace(
+        support_bank=SimpleNamespace(
+            get_mean_accuracy_by_column=lambda num_columns: np.zeros(num_columns)
+        )
+    )
+    trainer.transweave_manager = SimpleNamespace(
+        shell_transweave=SimpleNamespace(
+            config=trainer.config.shell_demotion_transweave,
+            column_histories={},
+        )
+    )
+
+    task_data = SimpleNamespace(
+        task_id=0,
+        train_loader=SimpleNamespace(
+            images=np.ones((2, 3), dtype=np.float32),
+            batch_size=2,
+        ),
+    )
+
+    result = trainer_module.SequentialTrainer._autotune_transition_thresholds(
+        trainer,
+        task_data=task_data,
+        active_cols=(0, 1),
+        verbose=False,
+    )
+
+    assert result == {}
 
 
 class TestShellDemotionTransWeave:

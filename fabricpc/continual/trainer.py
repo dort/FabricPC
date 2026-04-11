@@ -5,7 +5,7 @@ Provides task-by-task training with support selection, checkpointing,
 and evaluation across all seen tasks.
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Dict, List, Tuple, Optional, Any, Callable
 import time
 import json
@@ -352,6 +352,8 @@ class SequentialTrainer:
             shell_config=config.shell_demotion_transweave,
         )
         self._last_transweave_stats: Dict[str, Any] = {}
+        self._last_transition_autotune: Dict[str, Any] = {}
+        self._transition_autotune_history: List[Dict[str, Any]] = []
 
         # Track column usage history for TransWeave shell dynamics
         self._column_usage_history: Dict[int, List[int]] = {}  # col_id -> [task_ids]
@@ -364,6 +366,267 @@ class SequentialTrainer:
     def training_mode(self) -> str:
         """Get current training mode."""
         return self.config.training.training_mode
+
+    def _estimate_rollout_signal(self, loader, max_batches: int) -> float:
+        """
+        Estimate a task-start rollout signal without mutating loader state when possible.
+
+        The signal is a lightweight proxy for task intensity/novelty used to
+        calibrate shell promotion/demotion thresholds before full training.
+        """
+        if max_batches <= 0:
+            return 0.5
+
+        batch_means = []
+        batch_stds = []
+
+        if hasattr(loader, "images") and hasattr(loader, "batch_size"):
+            images = np.asarray(loader.images)
+            batch_size = int(loader.batch_size)
+            for batch_idx in range(max_batches):
+                start = batch_idx * batch_size
+                if start >= len(images):
+                    break
+                batch = np.asarray(images[start : start + batch_size], dtype=np.float32)
+                if batch.size == 0:
+                    continue
+                batch_means.append(float(np.mean(np.abs(batch))))
+                batch_stds.append(float(np.std(batch)))
+        else:
+            for batch_idx, (images, _) in enumerate(loader):
+                if batch_idx >= max_batches:
+                    break
+                batch = np.asarray(images, dtype=np.float32)
+                if batch.size == 0:
+                    continue
+                batch_means.append(float(np.mean(np.abs(batch))))
+                batch_stds.append(float(np.std(batch)))
+
+        if not batch_means:
+            return 0.5
+
+        mean_abs = float(np.mean(batch_means))
+        mean_std = float(np.mean(batch_stds))
+        return float(np.clip(0.65 * mean_abs + 0.35 * mean_std, 0.05, 1.5))
+
+    def _build_shell_rollout_state(
+        self,
+        task_id: int,
+        active_cols: Tuple[int, ...],
+        rollout_signal: float,
+    ) -> Tuple[Dict[int, np.ndarray], Dict[int, np.ndarray]]:
+        """Build deterministic shell assignments and activity proxies for autotuning."""
+        shell_sizes = self.config.shell_demotion_transweave.shell_sizes
+        num_columns = self.config.columns.num_columns
+        num_shells = len(shell_sizes)
+        num_neurons = sum(shell_sizes)
+
+        support_mean_acc = (
+            self.support_manager.support_bank.get_mean_accuracy_by_column(num_columns)
+        )
+        active_set = set(active_cols)
+        historical_active = {
+            col_id
+            for col_id, task_ids in self._column_usage_history.items()
+            if any(prev_task < task_id for prev_task in task_ids)
+        }
+
+        shell_assignments = np.repeat(
+            np.arange(num_shells, dtype=np.int32),
+            np.asarray(shell_sizes, dtype=np.int32),
+        )
+        column_activities: Dict[int, np.ndarray] = {}
+        column_assignments: Dict[int, np.ndarray] = {}
+
+        for col_id in range(num_columns):
+            is_active = col_id in active_set
+            was_active = col_id in historical_active
+            history_depth = len(
+                [t for t in self._column_usage_history.get(col_id, []) if t < task_id]
+            )
+            support_prior = (
+                float(support_mean_acc[col_id]) if support_mean_acc[col_id] > 0 else 0.5
+            )
+
+            activities = np.zeros(num_neurons, dtype=np.float64)
+            for neuron_id, shell_id in enumerate(shell_assignments):
+                shell_base = 0.78 - 0.22 * shell_id
+                activity = shell_base
+                if is_active:
+                    activity += 0.10 + 0.08 * rollout_signal - 0.05 * shell_id
+                elif was_active:
+                    activity -= 0.03 + 0.04 * shell_id
+                    activity += min(history_depth, 4) * 0.01
+                else:
+                    activity -= 0.15 + 0.05 * shell_id
+
+                activity += 0.10 * (support_prior - 0.5)
+                phase = (
+                    task_id * 0.37 + col_id * 0.19 + shell_id * 0.23 + neuron_id * 0.11
+                )
+                activity += 0.04 * np.sin(phase)
+                activities[neuron_id] = np.clip(activity, 0.05, 0.99)
+
+            column_activities[col_id] = activities
+            column_assignments[col_id] = shell_assignments.copy()
+
+        return column_activities, column_assignments
+
+    def _autotune_transition_thresholds(
+        self,
+        task_data: TaskData,
+        active_cols: Tuple[int, ...],
+        verbose: bool = False,
+    ) -> Dict[str, Any]:
+        """
+        Autotune shell promotion/demotion thresholds from limited task-start rollouts.
+        """
+        autotune_cfg = self.config.transition_autotune
+        shell_cfg = self.config.shell_demotion_transweave
+        shell_transweave = self.transweave_manager.shell_transweave
+
+        if not autotune_cfg.enable or not shell_cfg.enable:
+            return {}
+
+        available_history_cols = [
+            col_id
+            for col_id, history in shell_transweave.column_histories.items()
+            if len(history) >= 1
+        ]
+        if not available_history_cols:
+            return {}
+
+        rollout_signal = self._estimate_rollout_signal(
+            task_data.train_loader, autotune_cfg.rollout_batches
+        )
+        column_activities, column_assignments = self._build_shell_rollout_state(
+            task_id=task_data.task_id,
+            active_cols=active_cols,
+            rollout_signal=rollout_signal,
+        )
+
+        max_cols = autotune_cfg.max_columns_to_check
+        columns_to_check = (
+            available_history_cols[:max_cols]
+            if max_cols > 0
+            else available_history_cols
+        )
+        if not columns_to_check:
+            return {}
+
+        original_cfg = shell_transweave.config
+        best: Optional[Dict[str, Any]] = None
+
+        target_demotions = autotune_cfg.target_demotions_per_column * len(
+            columns_to_check
+        )
+        target_promotions = autotune_cfg.target_promotions_per_column * len(
+            columns_to_check
+        )
+        max_demotions = autotune_cfg.max_demotions_per_column * len(columns_to_check)
+        max_promotions = autotune_cfg.max_promotions_per_column * len(columns_to_check)
+
+        try:
+            for demotion_threshold in autotune_cfg.demotion_threshold_candidates:
+                for promotion_threshold in autotune_cfg.promotion_threshold_candidates:
+                    for max_step in autotune_cfg.max_demotions_per_step_candidates:
+                        candidate_cfg = replace(
+                            original_cfg,
+                            demotion_threshold=float(demotion_threshold),
+                            promotion_threshold=float(promotion_threshold),
+                            max_demotions_per_step=int(max_step),
+                        )
+                        shell_transweave.config = candidate_cfg
+
+                        total_demotions = 0
+                        total_promotions = 0
+                        total_transport_cost = 0.0
+                        total_entropy = 0.0
+
+                        for col_id in columns_to_check:
+                            result = shell_transweave.compute_demotion_transport(
+                                column_id=col_id,
+                                current_activities=column_activities[col_id],
+                                current_assignments=column_assignments[col_id],
+                            )
+                            total_demotions += len(result.demotion_candidates)
+                            total_promotions += len(result.promotion_candidates)
+                            total_transport_cost += float(
+                                result.diagnostics.get("transport_cost", 0.0)
+                            )
+                            total_entropy += float(
+                                result.diagnostics.get("shell_transition_entropy", 0.0)
+                            )
+
+                        score = autotune_cfg.target_weight * (
+                            abs(total_demotions - target_demotions)
+                            + abs(total_promotions - target_promotions)
+                        )
+                        score += autotune_cfg.overfire_penalty * max(
+                            0.0, total_demotions - max_demotions
+                        )
+                        score += autotune_cfg.overfire_penalty * max(
+                            0.0, total_promotions - max_promotions
+                        )
+                        score += autotune_cfg.transport_cost_weight * (
+                            total_transport_cost / max(len(columns_to_check), 1)
+                        )
+                        score += autotune_cfg.entropy_weight * (
+                            total_entropy / max(len(columns_to_check), 1)
+                        )
+                        score += autotune_cfg.config_distance_weight * (
+                            abs(demotion_threshold - original_cfg.demotion_threshold)
+                            + abs(
+                                promotion_threshold - original_cfg.promotion_threshold
+                            )
+                            + 0.25 * abs(max_step - original_cfg.max_demotions_per_step)
+                        )
+
+                        candidate_result = {
+                            "task_id": task_data.task_id,
+                            "rollout_signal": rollout_signal,
+                            "checked_columns": tuple(columns_to_check),
+                            "demotion_threshold": float(demotion_threshold),
+                            "promotion_threshold": float(promotion_threshold),
+                            "max_demotions_per_step": int(max_step),
+                            "estimated_demotions": int(total_demotions),
+                            "estimated_promotions": int(total_promotions),
+                            "score": float(score),
+                        }
+                        if best is None or score < best["score"]:
+                            best = candidate_result
+        finally:
+            shell_transweave.config = original_cfg
+
+        if best is None:
+            return {}
+
+        tuned_cfg = replace(
+            original_cfg,
+            demotion_threshold=best["demotion_threshold"],
+            promotion_threshold=best["promotion_threshold"],
+            max_demotions_per_step=best["max_demotions_per_step"],
+        )
+        self.config.shell_demotion_transweave = tuned_cfg
+        shell_transweave.config = tuned_cfg
+
+        self._last_transition_autotune = best
+        self._transition_autotune_history.append(dict(best))
+
+        if verbose:
+            print("Transition autotune:")
+            print(
+                "  thresholds="
+                f"({best['demotion_threshold']:.3f}, {best['promotion_threshold']:.3f}) "
+                f"max_step={best['max_demotions_per_step']}"
+            )
+            print(
+                f"  rollout estimate: demotions={best['estimated_demotions']}, "
+                f"promotions={best['estimated_promotions']}, "
+                f"signal={best['rollout_signal']:.3f}"
+            )
+
+        return best
 
     def train_task(
         self,
@@ -391,6 +654,11 @@ class SequentialTrainer:
         # Select support columns
         support_state = self.support_manager.select_support_for_task(task_id)
         support_cols = support_state.active_all
+        self._autotune_transition_thresholds(
+            task_data=task_data,
+            active_cols=support_cols,
+            verbose=verbose,
+        )
 
         if verbose:
             print(f"Active columns: {support_cols}")

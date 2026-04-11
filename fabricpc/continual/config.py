@@ -416,6 +416,30 @@ class AuditConfig:
 
 
 @dataclass
+class TransitionAutotuneConfig:
+    """Task-start autotuning for shell promotion/demotion thresholds."""
+
+    enable: bool = False
+    rollout_batches: int = 2
+    max_columns_to_check: int = 10
+
+    demotion_threshold_candidates: Tuple[float, ...] = (0.05, 0.10, 0.15, 0.20)
+    promotion_threshold_candidates: Tuple[float, ...] = (0.15, 0.25, 0.35, 0.45)
+    max_demotions_per_step_candidates: Tuple[int, ...] = (1, 2)
+
+    target_demotions_per_column: float = 0.35
+    target_promotions_per_column: float = 0.20
+    max_demotions_per_column: float = 0.80
+    max_promotions_per_column: float = 0.60
+
+    target_weight: float = 1.0
+    overfire_penalty: float = 2.0
+    transport_cost_weight: float = 0.05
+    entropy_weight: float = 0.02
+    config_distance_weight: float = 0.10
+
+
+@dataclass
 class PredictorConfig:
     """Predictor model configuration."""
 
@@ -494,6 +518,9 @@ class ExperimentConfig:
     )
     checkpoint: CheckpointConfig = field(default_factory=CheckpointConfig)
     audit: AuditConfig = field(default_factory=AuditConfig)
+    transition_autotune: TransitionAutotuneConfig = field(
+        default_factory=TransitionAutotuneConfig
+    )
     predictor: PredictorConfig = field(default_factory=PredictorConfig)
     per_weight_causal: PerWeightCausalConfig = field(
         default_factory=PerWeightCausalConfig
