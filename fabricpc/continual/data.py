@@ -109,6 +109,11 @@ class SplitMnistTaskLoader:
 def _load_mnist_keras():
     """Load MNIST using Keras (more reliable than tfds for some versions)."""
     try:
+        import os
+
+        # Suppress TensorFlow warnings about CUDA (we use JAX for GPU)
+        os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
+
         from tensorflow.keras.datasets import mnist
 
         (train_images, train_labels), (test_images, test_labels) = mnist.load_data()

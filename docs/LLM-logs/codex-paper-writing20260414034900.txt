@@ -1,0 +1,435 @@
+ni@rogrdora:~/repos/freeFabricPC$ codex
+
+╭─────────────────────────────────────────────────╮
+│ ✨ Update available! 0.115.0 -> 0.120.0         │
+│ Run npm install -g @openai/codex to update.     │
+│                                                 │
+│ See full release notes:                         │
+│ https://github.com/openai/codex/releases/latest │
+╰─────────────────────────────────────────────────╯
+
+╭───────────────────────────────────────╮
+│ >_ OpenAI Codex (v0.115.0)            │
+│                                       │
+│ model:     gpt-5.4   /model to change │
+│ directory: ~/repos/freeFabricPC       │
+╰───────────────────────────────────────╯
+
+  Tip: New Use /fast to enable our fastest inference at 2X plan usage.
+
+
+› Using the two PDF files in this current directory and the code recently added to the experimental branches in the FabricPC github repository here, please write
+  an academic paper on these topics, which emphasizes the experimental results and lays out a path forward to expanding these ideas for continual learning based on
+  columnar neural networks that leverage causal coding and predictive coding ideas beyond the simple split MNIST domain.
+
+
+• I’m going to inspect the current directory for the two PDFs and the recent experimental branch changes, then extract the relevant results and draft the paper in
+  the repo so it is grounded in the actual materials here.
+
+• Ran pwd
+  └ /home/ni/repos/freeFabricPC
+
+• Ran git branch --all --sort=-committerdate
+  └ fatal: not a git repository (or any of the parent directories): .git
+
+• Ran git status --short
+  └ fatal: not a git repository (or any of the parent directories): .git
+
+• Explored
+  └ List rg --files -g '*.pdf' -g '!**/.git/**'
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• The top-level directory is not itself a git repo; the relevant repository appears to be FabricPC. I’m switching into that repo, extracting the PDFs’ text, and
+  checking which experimental branches and result artifacts are actually present.
+
+• Explored
+  └ List ls -la
+
+• Ran git status --short
+  └  M fabricpc/continual/data.py
+    ?? results/
+
+• Ran git branch --all --sort=-committerdate
+  └   experimental/columnar
+    * paper
+    … +6 lines
+      remotes/origin/main
+      remotes/origin/experimental/continual_learning_testing_protocol
+
+• Explored
+  └ Search *.md in .
+
+• Ran pdftotext /home/ni/repos/freeFabricPC/v_20_b_vs_v_18.pdf - | sed -n '1,260p'
+  └ From V18 to V20.2b in the Columnar MNIST Continual-Learning
+    Programme
+    … +256 lines
+
+    The replay bank does not directly choose support. It proposes candidates.
+
+• Ran pdftotext /home/ni/repos/freeFabricPC/columnar_bayesian_causal_coding_v3.pdf - | sed -n '1,220p'
+  └ Columnar Bayesian Causal Coding Networks:
+    A Two-Level Architecture for Causal Modularity,
+    … +216 lines
+    network (CBCCN) is a tuple
+    N = (Gcol , {Ca }N
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• I have the two PDFs’ framing. Next I’m pulling the branch diffs, docs, and any local results artifacts so the paper can cite the actual experimental progression
+  rather than just restating the theory PDFs.
+
+• Ran git diff --stat main..experimental/causal_coding
+  └ (no output)
+
+• Ran git log --oneline --decorate -n 20 --all --graph
+  └ * 2fba6fd (HEAD -> paper, origin/paper, origin/experimental/columnar, experimental/columnar) another improvement suggested by codex
+    * 3a30f1e I'm using codex and trying to implement Ben's idea of auto-tuning parameters for promotion and demotion instead of just setting them statically
+    … +17 lines
+    * a8a09f0 Use JAX for optimal transport and weight causal computations
+    * 5937839 Extract Sinkhorn optimal transport to shared module
+
+• Explored
+  └ List results
+    Read future_strategic_improvements.md, fabricpc_port_summary.md
+
+• Ran git diff --stat main..experimental/columnar
+  └  .github/workflows/notebook-parity.yml          |   39 +
+     benchmarks/notebook_parity_baselines.json      |   28 +
+    … +22 lines
+     tests/test_transweave.py                       |  131 ++
+     25 files changed, 11594 insertions(+), 268 deletions(-)
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• I’ve got the repo-level narrative and the strategic roadmap. Now I’m extracting the concrete Split-MNIST summaries and the branch-level code changes that matter
+  most for an academic paper focused on experimental evidence and the path beyond Split-MNIST.
+
+• Ran for f in results/split_mnist/*/summaries.json; do echo FILE:$f; sed -n '1,220p' "$f"; done
+  └ FILE:results/split_mnist/split_mnist_seed42_20260407_200236/summaries.json
+    [
+    … +659 lines
+          1,
+          2,
+
+• Explored
+  └ Read README.md, PROTOCOL.md
+
+• Ran git diff main..experimental/columnar -- examples/split_mnist_causal.py fabricpc/continual/causal.py fabricpc/continual/support.py fabricpc/continual/
+  │ trainer.py fabricpc/continual/parity.py tests/test_notebook_parity.py | sed -n '1,320p'
+  └ diff --git a/examples/split_mnist_causal.py b/examples/split_mnist_causal.py
+    index f9e1c5e..160839f 100644
+    … +316 lines
+    +        out_task_ids, out_col_ids, out_gains = self._outcome_arrays()
+             return {
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• I’ve confirmed the branch delta is concentrated in the experimental/columnar line: notebook parity, batched support/causal logic, and transition autotuning. I’m
+  now collapsing the local result directories into reportable metrics and then I’ll write the paper into the repo in a publication-friendly format.
+
+• Explored
+  └ Search Average Forgetting|mean accuracy|forgetting|BWT|split_mnist_seed42|quick-smoke|mix_gate|transition autotune in docs
+    List docs
+
+• Ran git diff main..experimental/columnar -- fabricpc/continual/config.py fabricpc/continual/parity.py fabricpc/continual/support.py fabricpc/continual/trainer.py
+  │ | sed -n '320,760p'
+  └ +        profile=profile_name,
+    +        seed=seed,
+    … +437 lines
+    +            (num_batches, actual_batch_size, ...) or None if buffer is empty
+    +        """
+
+• Ran python - <<'PY'
+  │ import json, glob, os, csv
+  │ for path in sorted(glob.glob('results/split_mnist/*/summaries.json')):
+  │ … +28 lines
+  └ results/split_mnist/split_mnist_seed42_20260407_200236
+     tasks 5 final_task_acc 0.9869 mean_seen_running 0.9927
+    … +3 lines
+      File "<stdin>", line 18, in <module>
+    ValueError: could not convert string to float: ''
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• The quantitative picture is consistent: strong Split-MNIST retention, but causal guidance is still mostly muted in the archived five-task runs, while the later
+  quick-smoke causal run shows the gating pathway can turn on. I’m turning that into a paper that emphasizes both the positive experimental signal and the limits of
+  the current evidence.
+
+• Explored
+  └ Read notebook_parity_regression.md, notebook_parity_baselines.json
+
+• Ran python - <<'PY'
+  │ import json, glob, os, csv
+  │ for path in sorted(glob.glob('results/split_mnist/*/summaries.json')):
+  │ … +33 lines
+  └ results/split_mnist/split_mnist_seed42_20260407_200236
+      tasks 5
+    … +5 lines
+      File "<stdin>", line 21, in <module>
+    ValueError: could not convert string to float: 'task_0'
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• The parity harness is useful for the paper because it gives two named control regimes, v18_like and v20_2b_like, with checked-in baseline metrics. I’m pulling the
+  matrix format now so I can report the archived five-task runs correctly instead of relying on incomplete summaries.
+
+• Explored
+  └ Read accuracy_matrix.csv, notebook_parity_regression.py
+    Search TransitionAutotune|transition_autotune|demotion_threshold|promotion_threshold|max_demotions_per_step in continual
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• I found one parity metric that is not paper-safe as written: the checked-in v18_like forgetting baseline is numerically inconsistent with the other evidence, so
+  I’m not going to present it as a substantive result. I’ll use the archived matrices, the documented quick-smoke runs, and the PDFs as the evidentiary core
+  instead.
+
+• Explored
+  └ Read fabricpc_port_summary.md
+
+• Ran python - <<'PY'
+  │ import csv, glob, os
+  │ for path in sorted(glob.glob('results/split_mnist/*/accuracy_matrix.csv')):
+  │ … +24 lines
+  └ results/split_mnist/split_mnist_seed42_20260407_200236
+      final_row [0.9461, 0.8903, 0.873, 0.9174, 0.9869]
+    … +8 lines
+      avg_acc 0.9181 avg_forgetting 0.0951 bwt -0.0951
+
+
+• Explored
+  └ Read trainer.py
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• I’m at the writing stage. The paper will be explicit about which numbers come from the theory PDFs, which come from archived five-task result matrices, and which
+  come from the newer FabricPC parity and smoke-run artifacts, so the evidence trail stays clean.
+
+• Ran python - <<'PY'
+  │ vals_acc=[0.9227,0.9240,0.9181]
+  │ vals_f=[0.0874,0.0817,0.0951]
+  │ … +6 lines
+  └ acc 0.9216 0.0031
+    forget 0.0881 0.0067
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• I’m writing the paper as a structured Markdown manuscript under docs/, with an abstract, methods/results discussion, and a forward-looking continual-learning
+  agenda centered on columnar predictive/causal coding beyond Split-MNIST.
+
+• Added FabricPC/docs/columnar_continual_learning_paper.md (+126 -0)
+      1 +# Columnar Predictive-Causal Networks for Continual Learning:
+      2 +# Experimental Lessons from Split-MNIST and a Path Beyond It
+      3 +
+      4 +## Abstract
+      5 +
+      6 +This paper synthesizes two local theory documents, `columnar_bayesian_causal_coding_v3.pdf` and `v_20_b_vs_v_18.pdf`, with the recent `experimental/columna
+         r` additions in the `FabricPC` repository. The resulting picture is a practical research program for continual learning based on columnar neural architectu
+         res that combine predictive coding, causal coding, replay-backed support selection, and conservative anti-overwrite mechanisms. The strongest current empir
+         ical evidence remains in the Split-MNIST regime, where archived five-task runs in this repository reach final average accuracies of `0.9227`, `0.9240`, and
+          `0.9181` with corresponding average forgetting of `0.0874`, `0.0817`, and `0.0951`, closely matching the earlier V18-era result summarized in the PDF (`0.
+         841` mean seen-task accuracy, `0.089` forgetting) while improving final retained accuracy. More recent FabricPC smoke and parity runs show that the V20.2b-
+         style control stack is now operational: replay, audit-guided causal scoring, TransWeave bookkeeping, and task-start transition autotuning have all been por
+         ted into modular code, and the causal guidance path can become active (`mix_gate` rising to `0.2711` and `0.3500` in a three-task causal smoke run). The ma
+         in conclusion is that the columnar causal-coding hypothesis is now supported as an engineering direction, but not yet validated as a general continual-lear
+         ning solution. The next decisive step is to pair the current control regime with a genuinely columnar host architecture and to evaluate it on harder benchm
+         arks, multi-seed protocols, and richer temporal domains.
+      7 +
+      8 +## 1. Introduction
+      9 +
+     10 +The central claim in `columnar_bayesian_causal_coding_v3.pdf` is that continual learning becomes more tractable when modularity is imposed at two levels. A
+         t the coarse scale, Bayesian routing among columns determines which modules are active and when reuse should give way to forking. At the fine scale, each c
+         olumn contains a sparse predictive-coding micrograph whose shell structure supports pruning, inhibition, and consolidation. The companion note `v_20_b_vs_v
+         _18.pdf` translates this architectural thesis into a concrete experimental lineage: V18 established a stable teacher-first scaffold for Split-MNIST, while
+         V20.2b sought to let replay-backed online proposals matter without sacrificing retention.
+     11 +
+     12 +The current `FabricPC` port is important because it moves these ideas out of monolithic notebooks and into a reusable predictive-coding library with a modu
+         lar continual-learning layer. The recent `experimental/columnar` branch extends that port with batched support and causal logic, a notebook-parity regressi
+         on harness, explicit V18-like and V20.2b-like profiles, and an opt-in transition-autotuning mechanism for shell promotion and demotion. This makes it possi
+         ble to ask a more serious question than whether the original notebooks were suggestive: what, exactly, has been demonstrated, and what is still missing bef
+         ore columnar predictive-causal networks can claim broad continual-learning relevance?
+     13 +
+     14 +## 2. Repository-Specific Architectural Synthesis
+     15 +
+     16 +Across the two PDFs and the current code, the same design pattern appears repeatedly.
+     17 +
+     18 +First, support selection is treated as a structured control problem rather than as ordinary weight adaptation. In the repository this appears in `fabricpc/
+         continual/support.py`, which maintains support banks, replay-backed support proposals, selector trust, and conservative replacement logic. The recent branc
+         h makes these operations more scalable by vectorizing column statistics, challenger scoring, and replay sampling.
+     19 +
+     20 +Second, causal coding is implemented not as a global theorem only, but as a practical feature-and-ranking stack. In `fabricpc/continual/causal.py`, the sys
+         tem learns from audit rows, tracks predictor agreement, and exports quantities that can influence support choice when evidence is strong enough. The recent
+          branch strengthens this path by batching predictor bookkeeping and by making parity metrics include mean causal mix-gate activity.
+     21 +
+     22 +Third, shell structure is now linked to runtime control. The task-start autotuning logic in `fabricpc/continual/trainer.py` evaluates candidate demotion an
+         d promotion thresholds using short rollouts and transport-style diagnostics. This is a modest but important step toward the paper’s broader claim that micr
+         ocolumn hygiene should be adjusted using task-local evidence rather than fixed once and left untouched.
+     23 +
+     24 +Taken together, the port does not yet realize the full columnar Bayesian causal coding network described in the theory PDF, but it does implement a recogni
+         zable approximation of the control regime: replay may propose, causal estimates may rank, shell transitions may adapt, and exact or near-exact audits remai
+         n the final authority.
+     25 +
+     26 +## 3. Experimental Evidence Available in This Repository
+     27 +
+     28 +### 3.1 Baseline from the V18/V20 note
+     29 +
+     30 +The PDF `v_20_b_vs_v_18.pdf` reports that the V18 system reached mean seen-task accuracy around `0.841` after five Split-MNIST tasks with mean forgetting a
+         round `0.089`. That result matters because it established the original teacher-first scaffold and showed that support diversification and local repair coul
+         d work without immediate collapse.
+     31 +
+     32 +### 3.2 Archived five-task FabricPC runs
+     33 +
+     34 +The strongest directly inspectable continual-learning artifacts in the repository are the archived Split-MNIST result directories under `results/split_mnis
+         t/`. Reading the saved `accuracy_matrix.csv` files gives the following final accuracies after task 4:
+     35 +
+     36 +| Run directory | Final average accuracy | Average forgetting | BWT |
+     37 +|---|---:|---:|---:|
+     38 +| `split_mnist_seed42_20260407_200236` | `0.9227` | `0.0874` | `-0.0874` |
+     39 +| `split_mnist_seed42_20260407_200545` | `0.9240` | `0.0817` | `-0.0817` |
+     40 +| `split_mnist_seed42_20260407_200748` | `0.9181` | `0.0951` | `-0.0951` |
+     41 +
+     42 +Across these three archived runs, final average accuracy is `0.9216 +/- 0.0031` and average forgetting is `0.0881 +/- 0.0067` over seeds/reruns present loc
+         ally. Two points stand out.
+     43 +
+     44 +1. The forgetting level is nearly identical to the V18 number in the PDF, which suggests that the port preserved the anti-forgetting character of the earli
+         er regime.
+     45 +2. Final retained accuracy is materially higher than the PDF’s V18 summary, suggesting that the ported implementation and its support-control scaffolding a
+         re at least competitive with the earlier notebook lineage on this benchmark.
+     46 +
+     47 +At the same time, the archived summaries show an important limitation: `causal_selector_mix_gate` remained `0.0` in these five-task runs. The system accumu
+         lated causal examples and some predictor correlation, but the gating threshold was never crossed strongly enough for causal guidance to visibly steer suppo
+         rt decisions. These runs therefore support the value of the teacher-first scaffold more strongly than they support the causal-guidance layer itself.
+     48 +
+     49 +### 3.3 Smoke and parity evidence for the later control stack
+     50 +
+     51 +The repository documentation in `docs/fabricpc_port_summary.md` records two newer smoke experiments run against the current code:
+     52 +
+     53 +1. `examples/split_mnist_continual.py --quick-smoke` completed five tasks with mean test accuracy about `0.9879` and average forgetting about `0.0748`, but
+          causal guidance remained effectively inactive.
+     54 +2. `examples/split_mnist_causal.py --quick-smoke --num-tasks 3` completed three tasks with final mean accuracy about `0.9556`, average forgetting about `0.
+         0574`, and visibly active causal gating, with `mix_gate` rising from `0.0` on task 0 to `0.2711` and `0.3500` on tasks 1 and 2.
+     55 +
+     56 +The parity harness in `benchmarks/notebook_parity_baselines.json` provides a consistent V20.2b-like three-task reference point: final mean accuracy `0.9543
+         `, average forgetting `0.0590`, and mean causal mix gate `0.1992`. This is not a publication-grade benchmark, but it is useful evidence that the later repl
+         ay-assisted, conservative-selection regime is now encoded in regression-tested repository machinery rather than left as notebook folklore.
+     57 +
+     58 +## 4. Interpretation
+     59 +
+     60 +The current evidence supports three claims.
+     61 +
+     62 +First, the columnar continual-learning idea has survived translation from theory PDF to notebook lineage to modular code. The repository now contains worki
+         ng implementations of replay-backed support selection, exact-audit-style supervision, causal challenger ranking, and shell-level transport heuristics.
+     63 +
+     64 +Second, the most robust empirical win so far is not that causal coding has clearly surpassed simpler methods, but that the teacher-first columnar control s
+         caffold is stable and repeatable on Split-MNIST. The five-task archived runs show a narrow forgetting band centered almost exactly on the earlier V18 numbe
+         r.
+     65 +
+     66 +Third, the causal and predictive extensions are promising but not yet decisive. When the gating path is inactive, the system behaves like a competent suppo
+         rt-managed replay learner. When the gating path turns on in the newer causal smoke regime, the behavior is encouraging, but the evidence is still limited t
+         o a short three-task run on an easy benchmark. In other words, the code now demonstrates mechanism liveness more clearly than benchmark superiority.
+     67 +
+     68 +## 5. Path Forward Beyond Split-MNIST
+     69 +
+     70 +The repository’s own strategic notes in `docs/future_strategic_improvements.md` point in the right direction, but the path can be sharpened around the colu
+         mnar causal-coding hypothesis itself.
+     71 +
+     72 +### 5.1 Build a genuine columnar host architecture
+     73 +
+     74 +The present examples still use a relatively simple feedforward graph. This undercuts the theory, because the support-selection stack is steering a host net
+         work that is weaker and less explicitly modular than the CBCCN proposal assumes. The next architecture should expose columns, shells, and composer pathways
+          as first-class graph builders rather than as indirect conventions.
+     75 +
+     76 +### 5.2 Make causal guidance predict retention, not only immediate gain
+     77 +
+     78 +The current causal stack is closer to a guarded challenger ranker than to a full continual-learning critic. The next version should predict at least three
+         quantities separately: current-task gain, old-task loss, and uncertainty. That would align the learned controller with the CCL view that low-commutator upd
+         ates matter more than locally attractive but globally destructive swaps.
+     79 +
+     80 +### 5.3 Move from replay as memory to replay as intervention design
+     81 +
+     82 +Replay rows should no longer be sampled only for generic retention. They should be organized around support sensitivity, audit disagreement, and counterfac
+         tual discriminativeness. That would make replay a source of approximate interventions, bringing practice closer to the causal-coding motivation in the theo
+         ry PDF.
+     83 +
+     84 +### 5.4 Expand benchmarks along structure, not only difficulty
+     85 +
+     86 +The next test suite should include:
+     87 +
+     88 +- Permuted-MNIST, to separate task-identity reuse from class-specific feature reuse.
+     89 +- Split Fashion-MNIST, to test whether the current support logic survives a less trivial visual domain.
+     90 +- Split CIFAR-10 or CIFAR-100, to test whether shell-level hygiene still helps when representations are less linearly separable.
+     91 +- A temporal or autoregressive benchmark, where predictive coding and causal routing can be tested in the setting they were originally meant to address.
+     92 +
+     93 +The longer-term target should be a multiresolution sequence model in which columns or microcolumns correspond to resolution bands, matching the transformer
+         -oriented discussion in `columnar_bayesian_causal_coding_v3.pdf`.
+     94 +
+     95 +### 5.5 Raise the standard of experimental claims
+     96 +
+     97 +The branch already adds parity regression and CI, but publication-level evidence will require:
+     98 +
+     99 +- multi-seed reporting with confidence intervals;
+    100 +- direct ablations for replay, causal ranking, TransWeave, and transition autotuning;
+    101 +- support-diversity and swap-acceptance statistics, not accuracy alone;
+    102 +- comparisons against naive fine-tuning, replay-only, and regularization baselines;
+    103 +- explicit reporting of when `mix_gate` stays inactive, because that determines whether the causal subsystem actually contributed.
+    104 +
+    105 +## 6. Continual Learning as Column Management
+    106 +
+    107 +A useful conceptual reframing emerges from the local materials. Continual learning in this family of systems is not best understood as generic parameter pr
+         otection. It is better understood as column management under uncertainty: selecting supports, estimating overlap, deciding when to reuse or repair, and pro
+         tecting the internal causal cleanliness of the selected columns. Predictive coding supplies the local inference dynamics; causal coding supplies the modula
+         rity criterion; replay and audit make the control loop data-driven; shell transitions supply a mechanism for fast structural adaptation without global rewr
+         iting.
+    108 +
+    109 +That reframing suggests why Split-MNIST is only a first step. On such a small benchmark, support management can look successful even when the host architec
+         ture is underexpressive and the causal gate is mostly dormant. Harder domains are needed not only because they are more difficult, but because they force t
+         he system to prove that its columnar abstractions carry real semantic load.
+    110 +
+    111 +## 7. Conclusion
+    112 +
+    113 +The local evidence supports a cautious positive conclusion. The `FabricPC` repository now contains a credible experimental substrate for columnar predictiv
+         e-causal continual learning. Archived Split-MNIST runs show stable forgetting around `0.088`, consistent with the earlier V18 story and paired with improve
+         d retained accuracy around `0.922`. The newer branch further shows that replay-assisted causal support guidance, parity-tested control profiles, and shell-
+         transition autotuning are no longer purely conceptual.
+    114 +
+    115 +What has not yet been shown is that these ideas scale beyond a carefully managed toy domain. The decisive next phase is therefore clear: instantiate a trul
+         y columnar architecture, make causal guidance explicitly retention-aware, and evaluate it on harder multi-seed continual-learning and sequence benchmarks.
+         If those steps succeed, the columnar predictive-causal framework will move from an interesting design philosophy to a serious candidate for general continu
+         al learning.
+    116 +
+    117 +## References
+    118 +
+    119 +1. `../columnar_bayesian_causal_coding_v3.pdf`
+    120 +2. `../v_20_b_vs_v_18.pdf`
+    121 +3. `docs/fabricpc_port_summary.md`
+    122 +4. `docs/future_strategic_improvements.md`
+    123 +5. `benchmarks/notebook_parity_baselines.json`
+    124 +6. `results/split_mnist/split_mnist_seed42_20260407_200236/accuracy_matrix.csv`
+    125 +7. `results/split_mnist/split_mnist_seed42_20260407_200545/accuracy_matrix.csv`
+    126 +8. `results/split_mnist/split_mnist_seed42_20260407_200748/accuracy_matrix.csv`
+
+─ Worked for 1m 27s ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• The manuscript is in place. I’m doing a quick verification pass on the file content and then I’ll give you the path and the evidence basis I used, so you can
+  extend or convert it to LaTeX if needed.
+
+• Explored
+  └ Read columnar_continual_learning_paper.md
+
+• Ran git status --short docs/columnar_continual_learning_paper.md
+  └ ?? docs/columnar_continual_learning_paper.md
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• I wrote the paper at FabricPC/docs/columnar_continual_learning_paper.md.
+
+  It is grounded in the two PDFs in /home/ni/repos/freeFabricPC/, the experimental/columnar branch changes, the checked-in parity harness, and the archived Split-
+  MNIST result matrices under results/split_mnist/. The paper emphasizes the actual local experimental signal: archived five-task final average accuracy 0.9216 +/-
+  0.0031, average forgetting 0.0881 +/- 0.0067, plus the newer three-task causal smoke/parity evidence showing that replay-backed causal gating is now live.
+
+  I did not run new long experiments for this draft; I used the existing local artifacts and documented runs. If you want, I can next convert this into LaTeX, add a
+  formal bibliography/citation style, or tighten it toward a NeurIPS/ICLR format.
+ 
+ 
+› Summarize recent commits
+ 
