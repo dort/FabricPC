@@ -1,0 +1,10 @@
+On April 5th, 2026, this repository and the code in it were relicensed but
+as of April 15th, 2026, that relicensing has been rescinded, and I,
+Charles King Derr, have decided that all code added here in this fork is
+licensed with the MIT license and only the MIT license.
+Copyright (c) 2026
+
+Much of the new code (added after April 5th, 2026) was inspired by the
+ideas and a port from a pytorch codebase created by Benjamin Goertzel.
+
+
