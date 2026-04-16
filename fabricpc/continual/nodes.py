@@ -234,17 +234,24 @@ class ColumnNode(NodeBase):
 
         num_columns, memory_dim = node_shape
 
-        # Get input shape (from patch embed: num_patches, embed_dim)
-        in_shape = input_shapes.get("in", (49, 64))
-        if len(in_shape) == 2:
-            num_patches, embed_dim = in_shape
-            input_dim = num_patches * embed_dim
-        else:
-            input_dim = int(np.prod(in_shape))
+        # Get input shape from the edge connected to "in" slot
+        # input_shapes keys are edge keys like "source->target:slot"
+        in_shape = None
+        for edge_key, shape in input_shapes.items():
+            if ":in" in edge_key:
+                in_shape = shape
+                break
+
+        if in_shape is None:
+            # Fallback for backwards compatibility
+            in_shape = (784,)  # Default to flattened MNIST
+
+        # Compute input dimension (flatten if needed)
+        input_dim = int(np.prod(in_shape))
 
         keys = jax.random.split(key, num_columns + 2)
 
-        # Per-column projections
+        # Per-column projections - each column has separate weights
         weights = {}
         for col_idx in range(num_columns):
             weights[f"col_{col_idx}_proj"] = initialize(

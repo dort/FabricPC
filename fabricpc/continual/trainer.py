@@ -36,6 +36,11 @@ from fabricpc.continual.transweave import (
     ComposerTransWeave,
     ShellDemotionTransWeave,
 )
+from fabricpc.continual.gradient_protection import (
+    GradientProtector,
+    GradientProtectionConfig,
+    gradient_protection_transform,
+)
 
 
 @dataclass
@@ -197,14 +202,43 @@ class SequentialTrainer:
             params = initialize_params(structure, init_key)
         self.params = params
 
-        # Initialize optimizer
+        # Gradient protection for continual learning (initialize early for optimizer chaining)
+        # Uses shell-based gradient masking to prevent catastrophic forgetting
+        gradient_protection_enable = getattr(config, "gradient_protection_enable", True)
+        gradient_protection_config = GradientProtectionConfig(
+            enable=gradient_protection_enable,
+            shell_scales=(
+                0.0,
+                0.1,
+                1.0,
+            ),  # Protected center, stable inner, disposable outer
+            protect_inactive_columns=True,
+            inactive_column_scale=0.0,  # Freeze inactive columns completely
+            shared_column_scale=0.0,  # Freeze shared columns too for maximum isolation
+            max_gradient_norm=1.0,
+        )
+        self.gradient_protector = GradientProtector(gradient_protection_config)
+
+        # Initialize optimizer (chain with gradient protection if enabled)
         if optimizer is None:
-            optimizer = optax.adamw(
+            base_optimizer = optax.adamw(
                 config.training.learning_rate,
                 weight_decay=config.training.weight_decay,
             )
-        self.optimizer = optimizer
-        self.opt_state = optimizer.init(params)
+        else:
+            base_optimizer = optimizer
+
+        # Chain gradient protection with optimizer for continual learning
+        if gradient_protection_enable:
+            self.optimizer = optax.chain(
+                gradient_protection_transform(self.gradient_protector),
+                base_optimizer,
+            )
+        else:
+            self.optimizer = base_optimizer
+
+        self.opt_state = self.optimizer.init(params)
+        self._base_optimizer = base_optimizer  # Keep reference for diagnostics
 
         # Support manager
         num_columns = config.columns.num_columns
@@ -569,6 +603,55 @@ class SequentialTrainer:
         if verbose:
             print(f"Active columns: {support_cols}")
 
+        # Update gradient protection for this task
+        # This sets up column activity and shell assignments for gradient masking
+        shared_cols = tuple(range(self.config.columns.shared_columns))
+        self.gradient_protector.set_task(task_id)
+        self.gradient_protector.set_active_columns(
+            active_columns=support_cols,
+            shared_columns=shared_cols,
+            num_columns=self.config.columns.num_columns,
+        )
+        # Set memory_dim for input masking on downstream layers (aggregator)
+        self.gradient_protector.state.memory_dim = self.config.columns.memory_dim
+        # Set active classes for output layer gradient masking
+        self.gradient_protector.set_active_classes(
+            active_classes=task_data.classes,
+            num_output_classes=10,  # Split-MNIST has 10 classes
+        )
+        # Set aggregator partitioning for task-specific pathways
+        self.gradient_protector.set_aggregator_config(
+            aggregator_dim=self.config.columns.aggregator_dim,
+            num_tasks=self.config.num_tasks,
+        )
+
+        # Get shell assignments from transweave manager if available
+        shell_assignments = {}
+        shell_sizes = self.config.shell_demotion_transweave.shell_sizes
+        for col_id in range(self.config.columns.num_columns):
+            history = self.transweave_manager.shell_transweave.column_histories.get(
+                col_id, []
+            )
+            if history:
+                # Use most recent shell state
+                shell_assignments[col_id] = history[-1].shell_assignments
+            else:
+                # Default to all neurons in outer shell (shell 2 = trainable)
+                num_neurons = sum(shell_sizes)
+                shell_assignments[col_id] = np.full(
+                    num_neurons, len(shell_sizes) - 1, dtype=np.int32
+                )
+
+        self.gradient_protector.set_shell_assignments(shell_assignments, shell_sizes)
+
+        if verbose:
+            protection_stats = self.gradient_protector.get_protection_stats()
+            print(
+                f"Gradient protection: {protection_stats['columns_fully_protected']} frozen, "
+                f"{protection_stats['columns_partially_protected']} partial, "
+                f"{protection_stats['columns_unprotected']} open"
+            )
+
         # Training configuration
         train_config = {
             "num_epochs": self.config.training.epochs_per_task,
@@ -820,6 +903,88 @@ class SequentialTrainer:
 
         return summary
 
+    def _evaluate_task_masked(
+        self,
+        task_data: TaskData,
+        rng_key: jax.Array,
+    ) -> float:
+        """
+        Evaluate on a task using task-masked accuracy.
+
+        Only considers the classes belonging to this task when computing argmax.
+        This prevents output interference from other tasks' class logits.
+
+        Args:
+            task_data: Task to evaluate
+            rng_key: JAX random key
+
+        Returns:
+            Task-masked accuracy
+        """
+        from fabricpc.graph.state_initializer import initialize_graph_state
+        from fabricpc.core.inference import run_inference
+
+        task_classes = task_data.classes  # e.g., (0, 1) for task 0
+
+        total_correct = 0
+        total_samples = 0
+
+        for batch_idx, batch_data in enumerate(task_data.test_loader):
+            # Convert batch
+            if isinstance(batch_data, (list, tuple)):
+                batch = {"x": jnp.array(batch_data[0]), "y": jnp.array(batch_data[1])}
+            elif isinstance(batch_data, dict):
+                batch = {k: jnp.array(v) for k, v in batch_data.items()}
+            else:
+                continue
+
+            batch_key, rng_key = jax.random.split(rng_key)
+            batch_size = batch["x"].shape[0]
+
+            # Set up clamps (only input during eval)
+            clamps = {}
+            if "x" in self.structure.task_map:
+                x_node = self.structure.task_map["x"]
+                clamps[x_node] = batch["x"]
+
+            # Initialize graph state
+            state = initialize_graph_state(
+                self.structure,
+                batch_size,
+                batch_key,
+                clamps=clamps,
+                params=self.params,
+            )
+
+            # Run inference
+            final_state = run_inference(self.params, state, clamps, self.structure)
+
+            # Get output logits
+            y_node = self.structure.task_map["y"]
+            predictions = final_state.nodes[y_node].z_mu  # (batch, num_classes)
+
+            # Task-masked argmax: only consider this task's classes
+            # Create mask: -inf for non-task classes, 0 for task classes
+            num_classes = predictions.shape[-1]
+            mask = jnp.full(num_classes, -jnp.inf)
+            for cls in task_classes:
+                mask = mask.at[cls].set(0.0)
+
+            # Apply mask and argmax
+            masked_predictions = predictions + mask[None, :]
+            pred_labels = jnp.argmax(masked_predictions, axis=1)
+
+            # Get true labels
+            true_labels = jnp.argmax(batch["y"], axis=1)
+
+            # Count correct
+            correct = jnp.sum(pred_labels == true_labels)
+            total_correct += int(correct)
+            total_samples += batch_size
+
+        accuracy = total_correct / total_samples if total_samples > 0 else 0.0
+        return accuracy
+
     def _update_accuracy_matrix(
         self, current_task_id: int, current_task_data: TaskData
     ):
@@ -827,39 +992,21 @@ class SequentialTrainer:
         if current_task_id not in self._accuracy_matrix:
             self._accuracy_matrix[current_task_id] = {}
 
-        eval_config = {"loss_type": "cross_entropy"}
-
         # Build list of all tasks to evaluate (previously seen + current)
         tasks_to_eval = list(self.tasks)  # Previously seen tasks
         # Add current task if not already in the list
         if not any(t.task_id == current_task_data.task_id for t in tasks_to_eval):
             tasks_to_eval.append(current_task_data)
 
-        # Evaluate on all seen tasks including current
+        # Evaluate on all seen tasks including current using TASK-MASKED evaluation
         for task_data in tasks_to_eval:
             eval_task_id = task_data.task_id
             eval_key, self.rng_key = jax.random.split(self.rng_key)
 
-            if self.training_mode == "backprop":
-                metrics = evaluate_backprop(
-                    self.params,
-                    self.structure,
-                    task_data.test_loader,
-                    eval_config,
-                    eval_key,
-                )
-            else:
-                metrics = evaluate_pcn(
-                    self.params,
-                    self.structure,
-                    task_data.test_loader,
-                    eval_config,
-                    eval_key,
-                )
+            # Use task-masked evaluation to avoid output interference
+            accuracy = self._evaluate_task_masked(task_data, eval_key)
 
-            self._accuracy_matrix[current_task_id][eval_task_id] = float(
-                metrics.get("accuracy", 0.0)
-            )
+            self._accuracy_matrix[current_task_id][eval_task_id] = accuracy
 
     def _run_support_swap_audit(
         self,

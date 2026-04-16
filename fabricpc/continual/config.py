@@ -50,6 +50,9 @@ class ColumnConfig:
     memory_dim: int = 64  # Dimension of each column's memory
     shared_columns: int = 8  # Number of always-active shared columns
     topk_nonshared: int = 4  # Number of non-shared columns to activate per task
+    aggregator_dim: int = (
+        128  # Output dimension of aggregator layer (partitioned by task)
+    )
 
 
 @dataclass
@@ -556,9 +559,11 @@ def make_config(quick_smoke: bool = False) -> ExperimentConfig:
 
         cfg.patch.patch_embed_dim = 8
         cfg.columns.memory_dim = 4
-        cfg.columns.num_columns = 8
+        # 5 tasks x 2 non-shared = 10 needed + 2 shared = 12 total for no column reuse
+        cfg.columns.num_columns = 12
         cfg.columns.shared_columns = 2
         cfg.columns.topk_nonshared = 2
+        cfg.columns.aggregator_dim = 128  # 128 neurons partitioned among 5 tasks
         cfg.shells.shell_sizes = (2, 4, 2)
 
         cfg.typing.start_after_steps = 0

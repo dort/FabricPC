@@ -354,6 +354,8 @@ class HybridSelectorPolicy:
         demotion_bank: Optional[DemotionBank] = None,
         current_features: Optional[np.ndarray] = None,
         exploration_rate: float = 0.1,
+        diversify_columns: bool = True,
+        diversification_penalty: float = 2.0,
     ) -> Tuple[int, ...]:
         """
         Select non-shared support columns for a task.
@@ -364,6 +366,8 @@ class HybridSelectorPolicy:
             demotion_bank: Bank of demoted columns
             current_features: Feature vector for similarity matching
             exploration_rate: Probability of random exploration
+            diversify_columns: If True, penalize columns used by other tasks
+            diversification_penalty: Penalty scale for used columns
 
         Returns:
             Tuple of selected non-shared column indices
@@ -398,7 +402,19 @@ class HybridSelectorPolicy:
                 ]
             )
 
-        # 4. Random exploration
+        # 4. Column diversification penalty for continual learning
+        # Penalize columns that were used by OTHER tasks to encourage fresh columns
+        if diversify_columns and support_bank is not None:
+            for row in support_bank.rows:
+                if row.task_id != task_id:
+                    # Penalize columns used by other tasks
+                    for col in row.support_cols:
+                        if col in nonshared_pool:
+                            pool_idx = np.where(nonshared_pool == col)[0]
+                            if pool_idx.size > 0:
+                                scores[pool_idx[0]] -= diversification_penalty
+
+        # 5. Random exploration
         if np.random.random() < exploration_rate:
             # Select randomly
             selected_indices = np.random.choice(
@@ -597,26 +613,36 @@ class SupportManager:
         Returns:
             Updated SupportState with selected columns
         """
-        # Decide whether to use policy or baseline
-        use_policy = self.trust_controller.should_use_policy()
+        # For continual learning, use sequential column assignment first
+        # to maximize column isolation between tasks
+        num_nonshared = self.num_columns - self.num_shared
+        columns_per_task = self.topk_nonshared
 
-        if use_policy:
-            selected = self.selector_policy.select_support(
-                task_id,
-                support_bank=self.support_bank,
-                demotion_bank=self.demotion_bank,
-                current_features=features,
-            )
+        # Determine if we can assign fresh columns to this task
+        # Tasks 0, 1, 2, ... get columns [2,3], [4,5], [6,7], etc.
+        # until we run out of fresh columns
+        max_isolated_tasks = num_nonshared // columns_per_task
+
+        if task_id < max_isolated_tasks:
+            # Assign fresh non-shared columns sequentially
+            start_col = self.num_shared + task_id * columns_per_task
+            selected = tuple(range(start_col, start_col + columns_per_task))
         else:
-            # Baseline: use current selection or random
-            if len(self.current_state.active_nonshared) == self.topk_nonshared:
-                selected = self.current_state.active_nonshared
-            else:
-                nonshared_pool = list(range(self.num_shared, self.num_columns))
-                indices = np.random.choice(
-                    len(nonshared_pool), size=self.topk_nonshared, replace=False
+            # Out of fresh columns, use policy or baseline with recycling
+            use_policy = self.trust_controller.should_use_policy()
+
+            if use_policy:
+                selected = self.selector_policy.select_support(
+                    task_id,
+                    support_bank=self.support_bank,
+                    demotion_bank=self.demotion_bank,
+                    current_features=features,
                 )
-                selected = tuple(nonshared_pool[i] for i in indices)
+            else:
+                # Baseline: cycle through available columns
+                cycle_idx = task_id % max_isolated_tasks
+                start_col = self.num_shared + cycle_idx * columns_per_task
+                selected = tuple(range(start_col, start_col + columns_per_task))
 
         # Apply causal guidance if available and configured
         if self.config is not None and self.config.causal_max_effective_scale > 0:

@@ -32,12 +32,14 @@ from fabricpc.core.activations import (
     SigmoidActivation,
     SoftmaxActivation,
     ReLUActivation,
+    IdentityActivation,
 )
 from fabricpc.core.energy import CrossEntropyEnergy, GaussianEnergy
 from fabricpc.core.inference import InferenceSGD
-from fabricpc.core.initializers import XavierInitializer
+from fabricpc.core.initializers import XavierInitializer, NormalInitializer
 
 from fabricpc.continual.config import make_config, ExperimentConfig
+from fabricpc.continual.nodes import ColumnNode
 from fabricpc.continual.data import SplitMnistLoader, build_split_mnist_loaders
 from fabricpc.continual.trainer import SequentialTrainer
 from fabricpc.continual.utils import (
@@ -52,56 +54,111 @@ from fabricpc.continual.utils import (
 )
 
 
-def create_network_structure(config: ExperimentConfig):
+def create_network_structure(config: ExperimentConfig, use_columns: bool = True):
     """
     Create the FabricPC graph structure for continual learning.
 
-    Architecture:
-        input (784) -> hidden1 (256) -> hidden2 (128) -> output (10)
+    If use_columns=True (default):
+        Uses ColumnNode architecture with true column isolation for CL:
+        input (784) -> columns (num_columns, memory_dim) -> aggregator -> output (10)
 
-    For a more sophisticated architecture with columns and composers,
-    use the custom nodes from fabricpc.continual.nodes.
+        Each column has separate weights (col_X_proj), enabling gradient protection
+        to freeze specific columns without affecting others.
+
+    If use_columns=False:
+        Uses standard Linear architecture (no column isolation):
+        input (784) -> hidden1 (256) -> hidden2 (128) -> output (10)
     """
     # Input node
     pixels = IdentityNode(shape=(784,), name="pixels")
 
-    # Hidden layers
-    hidden1 = Linear(
-        shape=(256,),
-        activation=ReLUActivation(),
-        energy=GaussianEnergy(),
-        name="hidden1",
-        weight_init=XavierInitializer(),
-    )
+    if use_columns:
+        # Modular ColumnNode architecture for true column isolation
+        num_columns = config.columns.num_columns
+        memory_dim = config.columns.memory_dim
 
-    hidden2 = Linear(
-        shape=(128,),
-        activation=ReLUActivation(),
-        energy=GaussianEnergy(),
-        name="hidden2",
-        weight_init=XavierInitializer(),
-    )
+        # ColumnNode: separate weights per column (col_X_proj)
+        # Each column processes the input independently
+        columns = ColumnNode(
+            shape=(num_columns, memory_dim),
+            name="columns",
+            num_shells=3,
+            shell_sizes=config.shell_demotion_transweave.shell_sizes,
+            activation=ReLUActivation(),
+            energy=GaussianEnergy(),
+            weight_init=NormalInitializer(mean=0.0, std=0.02),
+        )
 
-    # Output layer
-    output = Linear(
-        shape=(10,),
-        activation=SoftmaxActivation(),
-        energy=CrossEntropyEnergy(),
-        name="output",
-        weight_init=XavierInitializer(),
-    )
+        # Aggregator: combines column outputs
+        # Input: flattened columns (num_columns * memory_dim)
+        # This layer learns to combine column outputs
+        # Output is partitioned among tasks for task-specific pathways
+        aggregator_dim = config.columns.aggregator_dim
+        aggregator = Linear(
+            shape=(aggregator_dim,),
+            activation=ReLUActivation(),
+            energy=GaussianEnergy(),
+            name="aggregator",
+            weight_init=XavierInitializer(),
+            flatten_input=True,  # Flatten (num_columns, memory_dim) to (num_columns * memory_dim)
+        )
 
-    # Build graph
-    structure = graph(
-        nodes=[pixels, hidden1, hidden2, output],
-        edges=[
-            Edge(source=pixels, target=hidden1.slot("in")),
-            Edge(source=hidden1, target=hidden2.slot("in")),
-            Edge(source=hidden2, target=output.slot("in")),
-        ],
-        task_map=TaskMap(x=pixels, y=output),
-        inference=InferenceSGD(eta_infer=0.05, infer_steps=20),
-    )
+        # Output layer
+        output = Linear(
+            shape=(10,),
+            activation=SoftmaxActivation(),
+            energy=CrossEntropyEnergy(),
+            name="output",
+            weight_init=XavierInitializer(),
+        )
+
+        # Build graph with column architecture
+        structure = graph(
+            nodes=[pixels, columns, aggregator, output],
+            edges=[
+                Edge(source=pixels, target=columns.slot("in")),
+                Edge(source=columns, target=aggregator.slot("in")),
+                Edge(source=aggregator, target=output.slot("in")),
+            ],
+            task_map=TaskMap(x=pixels, y=output),
+            inference=InferenceSGD(eta_infer=0.05, infer_steps=20),
+        )
+    else:
+        # Standard Linear architecture (no column isolation)
+        hidden1 = Linear(
+            shape=(256,),
+            activation=ReLUActivation(),
+            energy=GaussianEnergy(),
+            name="hidden1",
+            weight_init=XavierInitializer(),
+        )
+
+        hidden2 = Linear(
+            shape=(128,),
+            activation=ReLUActivation(),
+            energy=GaussianEnergy(),
+            name="hidden2",
+            weight_init=XavierInitializer(),
+        )
+
+        output = Linear(
+            shape=(10,),
+            activation=SoftmaxActivation(),
+            energy=CrossEntropyEnergy(),
+            name="output",
+            weight_init=XavierInitializer(),
+        )
+
+        structure = graph(
+            nodes=[pixels, hidden1, hidden2, output],
+            edges=[
+                Edge(source=pixels, target=hidden1.slot("in")),
+                Edge(source=hidden1, target=hidden2.slot("in")),
+                Edge(source=hidden2, target=output.slot("in")),
+            ],
+            task_map=TaskMap(x=pixels, y=output),
+            inference=InferenceSGD(eta_infer=0.05, infer_steps=20),
+        )
 
     return structure
 
@@ -130,6 +187,11 @@ def main():
     parser.add_argument(
         "--epochs", type=int, default=None, help="Override epochs per task"
     )
+    parser.add_argument(
+        "--no-columns",
+        action="store_true",
+        help="Use standard Linear architecture instead of ColumnNode (disables column isolation)",
+    )
     args = parser.parse_args()
 
     print("=" * 60)
@@ -150,6 +212,10 @@ def main():
     print(f"  Batch size: {config.training.batch_size}")
     print(f"  Task pairs: {config.task_pairs}")
     print(f"  Quick smoke: {args.quick_smoke}")
+    print(f"  Column architecture: {not args.no_columns}")
+    print(
+        f"  Columns: {config.columns.num_columns} (shared: {config.columns.shared_columns})"
+    )
 
     # Initialize JAX
     jax.config.update("jax_default_prng_impl", "threefry2x32")
@@ -157,8 +223,9 @@ def main():
     init_key, train_key = jax.random.split(master_key)
 
     # Create network
-    print("\nCreating network...")
-    structure = create_network_structure(config)
+    use_columns = not args.no_columns
+    print(f"\nCreating network (columns={use_columns})...")
+    structure = create_network_structure(config, use_columns=use_columns)
     params = initialize_params(structure, init_key)
 
     total_params = sum(p.size for p in jax.tree_util.tree_leaves(params))
