@@ -1405,17 +1405,25 @@ class SequentialTrainer:
                 was_active_before = col_id in prev_active_cols
                 is_declining = was_active_before and not is_active_now
 
-                # Create shell assignments
-                shell_assignments = np.zeros(num_neurons, dtype=np.int32)
-                shell_boundaries = [0]
-                for size in shell_sizes:
-                    shell_boundaries.append(shell_boundaries[-1] + size)
+                # Get shell assignments from history if available, otherwise create fresh
+                history = self.transweave_manager.shell_transweave.column_histories.get(
+                    col_id, []
+                )
+                if history:
+                    # Use persisted assignments from last task
+                    shell_assignments = history[-1].shell_assignments.copy()
+                else:
+                    # Create fresh assignments for new columns
+                    shell_assignments = np.zeros(num_neurons, dtype=np.int32)
+                    shell_boundaries = [0]
+                    for size in shell_sizes:
+                        shell_boundaries.append(shell_boundaries[-1] + size)
 
-                for i in range(num_neurons):
-                    for s in range(num_shells):
-                        if shell_boundaries[s] <= i < shell_boundaries[s + 1]:
-                            shell_assignments[i] = s
-                            break
+                    for i in range(num_neurons):
+                        for s in range(num_shells):
+                            if shell_boundaries[s] <= i < shell_boundaries[s + 1]:
+                                shell_assignments[i] = s
+                                break
 
                 # Create neuron activities with shell-dependent patterns
                 neuron_activities = np.zeros(num_neurons)
@@ -1478,8 +1486,17 @@ class SequentialTrainer:
                             current_activities=column_activities[col_id],
                             current_assignments=column_assignments[col_id],
                         )
-                        total_demotions += len(result.demotion_candidates)
-                        total_promotions += len(result.promotion_candidates)
+                        # Apply the transitions to actually modify shell assignments
+                        if result.demotion_candidates or result.promotion_candidates:
+                            new_assignments, counts = (
+                                self.transweave_manager.shell_transweave.apply_transitions(
+                                    column_assignments[col_id],
+                                    result,
+                                )
+                            )
+                            column_assignments[col_id] = new_assignments
+                            total_demotions += counts["demotions_applied"]
+                            total_promotions += counts["promotions_applied"]
 
             # Now register the new states
             for col_id in range(num_columns):
