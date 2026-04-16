@@ -162,7 +162,6 @@ def make_parity_config(profile_name: str, seed: int = 42) -> ExperimentConfig:
     cfg.training.fast_dev_max_test_batches = 4
 
     if profile_name == "v18_like":
-        cfg.support.use_replay = False
         cfg.support.replay_bank_support_enable = False
         cfg.support.causal_max_effective_scale = 0.0
         cfg.support.route_enable = False
@@ -177,7 +176,6 @@ def make_parity_config(profile_name: str, seed: int = 42) -> ExperimentConfig:
         cfg.composer.enable = False
         cfg.hierarchy.enable = False
     elif profile_name == "v20_2b_like":
-        cfg.support.use_replay = True
         cfg.support.replay_bank_support_enable = True
         cfg.support.causal_max_effective_scale = 0.5
         cfg.support.route_enable = True

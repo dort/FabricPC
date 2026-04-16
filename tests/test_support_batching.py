@@ -182,67 +182,6 @@ def test_replay_buffer_sample_batches_returns_dense_epoch_batches():
     assert np.all(np.isin(sampled_labels, labels_a))
 
 
-def test_interleaved_loader_presamples_replay_once_per_epoch():
-    current_batches = [
-        (
-            np.full((2, 3), fill_value=1.0, dtype=np.float32),
-            np.full((2, 2), fill_value=1.0, dtype=np.float32),
-        ),
-        (
-            np.full((2, 3), fill_value=2.0, dtype=np.float32),
-            np.full((2, 2), fill_value=2.0, dtype=np.float32),
-        ),
-    ]
-
-    class MockLoader:
-        def __init__(self, batches):
-            self._batches = batches
-            self.batch_size = len(batches[0][0])
-
-        def __len__(self):
-            return len(self._batches)
-
-        def __iter__(self):
-            return iter(self._batches)
-
-    class MockReplayBuffer:
-        def __init__(self):
-            self.sample_batches_calls = []
-
-        def __len__(self):
-            return 1
-
-        def get_task_ids(self):
-            return [0]
-
-        def sample_batches(self, num_batches, batch_size, exclude_task=None):
-            self.sample_batches_calls.append((num_batches, batch_size, exclude_task))
-            replay_images = np.full(
-                (num_batches, batch_size, 3), fill_value=9.0, dtype=np.float32
-            )
-            replay_labels = np.full(
-                (num_batches, batch_size, 2), fill_value=9.0, dtype=np.float32
-            )
-            return replay_images, replay_labels
-
-    loader = trainer_module.InterleavedLoader(
-        current_loader=MockLoader(current_batches),
-        replay_buffer=MockReplayBuffer(),
-        current_task_id=1,
-        replay_ratio=0.5,
-    )
-
-    mixed_batches = list(loader)
-
-    assert len(mixed_batches) == 2
-    assert loader.replay_buffer.sample_batches_calls == [(2, 1, 1)]
-    for images, labels in mixed_batches:
-        assert images.shape == (3, 3)
-        assert labels.shape == (3, 2)
-        assert np.sum(np.all(images == 9.0, axis=1)) == 1
-        assert np.sum(np.all(labels == 9.0, axis=1)) == 1
-
-
 def test_agreement_tracker_array_backed_matching_and_state_roundtrip():
     tracker = AgreementTracker(max_history=6)
 

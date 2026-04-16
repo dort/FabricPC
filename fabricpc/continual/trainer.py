@@ -22,7 +22,7 @@ from fabricpc.training.train_backprop import train_backprop, evaluate_backprop
 
 from fabricpc.continual.config import ExperimentConfig
 from fabricpc.continual.data import TaskData
-from fabricpc.continual.support import SupportManager, SupportState, ReplayBuffer
+from fabricpc.continual.support import SupportManager, SupportState
 from fabricpc.continual.causal import (
     CausalSupportFeatureBuilder,
     weighted_corr,
@@ -36,92 +36,6 @@ from fabricpc.continual.transweave import (
     ComposerTransWeave,
     ShellDemotionTransWeave,
 )
-
-
-class InterleavedLoader:
-    """
-    Data loader that interleaves current task samples with replay samples.
-
-    Used for experience replay during continual learning to prevent
-    catastrophic forgetting.
-    """
-
-    def __init__(
-        self,
-        current_loader,
-        replay_buffer: ReplayBuffer,
-        current_task_id: int,
-        replay_ratio: float = 0.5,
-        num_classes: int = 10,
-    ):
-        """
-        Initialize interleaved loader.
-
-        Args:
-            current_loader: Data loader for current task
-            replay_buffer: Buffer containing samples from previous tasks
-            current_task_id: ID of current task (excluded from replay)
-            replay_ratio: Ratio of replay samples (0.5 = equal mix)
-            num_classes: Number of output classes for label formatting
-        """
-        self.current_loader = current_loader
-        self.replay_buffer = replay_buffer
-        self.current_task_id = current_task_id
-        self.replay_ratio = replay_ratio
-        self.num_classes = num_classes
-
-        # Calculate batch sizes
-        self.current_batch_size = current_loader.batch_size
-        self.replay_batch_size = int(self.current_batch_size * replay_ratio)
-        self.has_replay = (
-            len(replay_buffer) > 0
-            and len(replay_buffer.get_task_ids()) > 0
-            and any(t != current_task_id for t in replay_buffer.get_task_ids())
-        )
-
-    def __len__(self):
-        return len(self.current_loader)
-
-    def __iter__(self):
-        replay_epoch = None
-        if self.has_replay and self.replay_batch_size > 0:
-            replay_epoch = self.replay_buffer.sample_batches(
-                num_batches=len(self.current_loader),
-                batch_size=self.replay_batch_size,
-                exclude_task=self.current_task_id,
-            )
-
-        for batch_idx, (current_images, current_labels) in enumerate(
-            self.current_loader
-        ):
-            if replay_epoch is not None:
-                replay_images, replay_labels = replay_epoch
-                replay_batch_images = replay_images[batch_idx]
-                replay_batch_labels = replay_labels[batch_idx]
-
-                combined_size = len(current_images) + len(replay_batch_images)
-                combined_images = np.empty(
-                    (combined_size,) + current_images.shape[1:],
-                    dtype=current_images.dtype,
-                )
-                combined_labels = np.empty(
-                    (combined_size,) + current_labels.shape[1:],
-                    dtype=current_labels.dtype,
-                )
-
-                perm = np.random.permutation(combined_size)
-                current_slots = perm[: len(current_images)]
-                replay_slots = perm[len(current_images) :]
-                combined_images[current_slots] = current_images
-                combined_images[replay_slots] = replay_batch_images
-                combined_labels[current_slots] = current_labels
-                combined_labels[replay_slots] = replay_batch_labels
-
-                yield combined_images, combined_labels
-                continue
-
-            # No replay available, just yield current batch
-            yield current_images, current_labels
 
 
 @dataclass
@@ -313,14 +227,6 @@ class SequentialTrainer:
 
         # Accuracy matrix: accuracy[trained_up_to_task][evaluated_on_task]
         self._accuracy_matrix: Dict[int, Dict[int, float]] = {}
-
-        # Experience replay buffer for preventing catastrophic forgetting
-        self.replay_buffer = ReplayBuffer(
-            max_samples_per_task=config.support.replay_buffer_size_per_task,
-            max_total_samples=config.support.replay_buffer_total_size,
-        )
-        self.use_replay = config.support.use_replay
-        self.replay_ratio = config.support.replay_ratio
 
         # Per-weight causal learning
         self.per_weight_causal = PerWeightCausalLearner(
@@ -677,24 +583,6 @@ class SequentialTrainer:
         train_loader = task_data.train_loader
         test_loader = task_data.test_loader
 
-        # Use interleaved loader with replay if enabled and we have previous tasks
-        if self.use_replay and len(self.replay_buffer) > 0:
-            train_loader = InterleavedLoader(
-                current_loader=task_data.train_loader,
-                replay_buffer=self.replay_buffer,
-                current_task_id=task_id,
-                replay_ratio=self.replay_ratio,
-                num_classes=10,  # MNIST has 10 classes
-            )
-            if verbose:
-                replay_tasks = [
-                    t for t in self.replay_buffer.get_task_ids() if t != task_id
-                ]
-                print(
-                    f"Replay enabled: mixing with {len(replay_tasks)} previous tasks "
-                    f"({self.replay_buffer.total_samples()} samples)"
-                )
-
         # Track epoch metrics
         epoch_accuracies = []
         epoch_losses = []
@@ -868,10 +756,6 @@ class SequentialTrainer:
             transweave_shell_promotions=transweave_stats.get("shell_promotions", 0),
         )
 
-        # Store samples in replay buffer for future tasks
-        if self.use_replay:
-            self._store_task_samples(task_data)
-
         # Record outcome in support manager
         self.support_manager.record_outcome(
             task_id=task_id,
@@ -935,33 +819,6 @@ class SequentialTrainer:
                     )
 
         return summary
-
-    def _store_task_samples(self, task_data: TaskData):
-        """
-        Store samples from a task in the replay buffer.
-
-        Collects samples by iterating through the training loader
-        and stores them for replay during future tasks.
-        """
-        all_images = []
-        all_labels = []
-
-        # Collect samples from the training loader
-        for images, labels in task_data.train_loader:
-            all_images.append(images)
-            all_labels.append(labels)
-
-        if all_images:
-            all_images = np.concatenate(all_images, axis=0)
-            all_labels = np.concatenate(all_labels, axis=0)
-
-            # Store in replay buffer
-            self.replay_buffer.add_task_samples(
-                task_id=task_data.task_id,
-                images=all_images,
-                labels=all_labels,
-                replace=True,  # Replace any existing samples for this task
-            )
 
     def _update_accuracy_matrix(
         self, current_task_id: int, current_task_data: TaskData

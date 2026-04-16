@@ -166,11 +166,11 @@ class SupportConfig:
     selector_policy_filename: str = "selector_policy.pt"
     selector_teacher_filename: str = "selector_teacher.pt"
 
-    # Experience replay for preventing catastrophic forgetting
-    use_replay: bool = True  # Enable experience replay during training
-    replay_ratio: float = 0.5  # Ratio of replay samples to current task samples
-    replay_buffer_size_per_task: int = 500  # Max samples stored per task
-    replay_buffer_total_size: int = 5000  # Max total samples in buffer
+    # Experience replay - DISABLED (removed as it undermines continual learning goals)
+    use_replay: bool = False  # Experience replay disabled
+    replay_ratio: float = 0.0  # Unused
+    replay_buffer_size_per_task: int = 0  # Unused
+    replay_buffer_total_size: int = 0  # Unused
 
 
 @dataclass
