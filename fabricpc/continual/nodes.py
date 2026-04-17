@@ -871,3 +871,206 @@ class GatedColumnNode(NodeBase):
         total_energy = jnp.sum(state.energy)
 
         return total_energy, state
+
+
+class PartitionedAggregator(NodeBase):
+    """
+    Aggregator with task-specific partitioned pathways for continual learning.
+
+    This node creates TRUE architectural isolation between tasks by having
+    separate weight matrices for each task's columns. Unlike gradient masking,
+    there are no connections between task partitions - the weights simply don't exist.
+
+    Architecture:
+    - Input: (batch, num_columns, memory_dim) from ColumnNode
+    - Shared columns (always first shared_columns) → shared partition
+    - Task-specific columns → task-specific partition (separate weights per task)
+    - Output: (batch, shared_dim + task_dim)
+
+    Connection Pattern:
+    - Shared cols [0:shared_columns] → weights_shared: (shared_cols * mem_dim, shared_dim)
+    - Task t cols [start_t:end_t] → weights_task_t: (topk_nonshared * mem_dim, task_dim)
+
+    Why this works:
+    - No gradient flow between task partitions (architectural isolation)
+    - Shared partition enables knowledge transfer
+    - Each task's columns only connect to that task's partition
+
+    Args:
+        shape: Output shape (shared_dim + task_dim,)
+        num_tasks: Number of tasks (default: 5 for Split-MNIST)
+        shared_columns: Number of shared columns (default: 2)
+        topk_nonshared: Columns per task (default: 4)
+        shared_dim: Output neurons for shared pathway (default: 32)
+        task_dim: Output neurons per task pathway (default: 64)
+        memory_dim: Input memory dimension per column (default: 64)
+    """
+
+    def __init__(
+        self,
+        shape: Tuple[int],
+        name: str,
+        num_tasks: int = 5,
+        shared_columns: int = 2,
+        topk_nonshared: int = 4,
+        shared_dim: int = 32,
+        task_dim: int = 64,
+        memory_dim: int = 64,
+        activation=ReLUActivation(),
+        energy=GaussianEnergy(),
+        latent_init=NormalInitializer(),
+        weight_init=NormalInitializer(mean=0.0, std=0.02),
+        **kwargs,
+    ):
+        # Output shape should match shared_dim + task_dim
+        actual_shape = (shared_dim + task_dim,)
+
+        super().__init__(
+            shape=actual_shape,
+            name=name,
+            activation=activation,
+            energy=energy,
+            latent_init=latent_init,
+            weight_init=weight_init,
+            num_tasks=num_tasks,
+            shared_columns=shared_columns,
+            topk_nonshared=topk_nonshared,
+            shared_dim=shared_dim,
+            task_dim=task_dim,
+            memory_dim=memory_dim,
+            **kwargs,
+        )
+
+    @staticmethod
+    def get_slots() -> Dict[str, SlotSpec]:
+        return {
+            "in": SlotSpec(name="in", is_multi_input=False),
+        }
+
+    @staticmethod
+    def initialize_params(
+        key: jax.Array,
+        node_shape: Tuple[int, ...],
+        input_shapes: Dict[str, Tuple[int, ...]],
+        weight_init=None,
+        config: Dict[str, Any] = {},
+    ) -> NodeParams:
+        if weight_init is None:
+            weight_init = NormalInitializer(mean=0.0, std=0.02)
+
+        from fabricpc.core.initializers import initialize
+
+        num_tasks = config.get("num_tasks", 5)
+        shared_columns = config.get("shared_columns", 2)
+        topk_nonshared = config.get("topk_nonshared", 4)
+        shared_dim = config.get("shared_dim", 32)
+        task_dim = config.get("task_dim", 64)
+        memory_dim = config.get("memory_dim", 64)
+
+        # Split keys for all weight matrices
+        keys = jax.random.split(key, num_tasks + 2)
+
+        weights = {}
+        biases = {}
+
+        # Shared pathway weights: (shared_columns * memory_dim, shared_dim)
+        shared_input_dim = shared_columns * memory_dim
+        weights["shared"] = initialize(
+            keys[0], (shared_input_dim, shared_dim), weight_init
+        )
+        biases["shared_bias"] = jnp.zeros((shared_dim,))
+
+        # Task-specific pathway weights: one per task
+        # Each task's columns: (topk_nonshared * memory_dim, task_dim)
+        task_input_dim = topk_nonshared * memory_dim
+        for task_id in range(num_tasks):
+            weights[f"task_{task_id}"] = initialize(
+                keys[task_id + 1], (task_input_dim, task_dim), weight_init
+            )
+            biases[f"task_{task_id}_bias"] = jnp.zeros((task_dim,))
+
+        return NodeParams(weights=weights, biases=biases)
+
+    @staticmethod
+    def forward(
+        params: NodeParams,
+        inputs: Dict[str, jnp.ndarray],
+        state: NodeState,
+        node_info: NodeInfo,
+    ) -> Tuple[jax.Array, NodeState]:
+        config = node_info.node_config
+        num_tasks = config.get("num_tasks", 5)
+        shared_columns = config.get("shared_columns", 2)
+        topk_nonshared = config.get("topk_nonshared", 4)
+        shared_dim = config.get("shared_dim", 32)
+        task_dim = config.get("task_dim", 64)
+        memory_dim = config.get("memory_dim", 64)
+
+        # Get input: (batch, num_columns, memory_dim)
+        x = inputs.get("in", inputs.get(list(inputs.keys())[0]))
+        batch_size = x.shape[0]
+
+        # Get current task_id from module-level variable
+        task_id = get_current_task_id()
+
+        # Clamp task_id to valid range
+        task_id = max(0, min(task_id, num_tasks - 1))
+
+        # === Shared pathway ===
+        # Extract shared columns: (batch, shared_columns, memory_dim)
+        x_shared = x[:, :shared_columns, :]
+        # Flatten: (batch, shared_columns * memory_dim)
+        x_shared_flat = x_shared.reshape(batch_size, -1)
+        # Project: (batch, shared_dim)
+        shared_out = jnp.matmul(x_shared_flat, params.weights["shared"])
+        shared_out = shared_out + params.biases["shared_bias"]
+
+        # === Task-specific pathway ===
+        # Calculate which columns belong to this task
+        # Non-shared columns start after shared_columns
+        # Task t's columns: [shared_columns + t*topk_nonshared : shared_columns + (t+1)*topk_nonshared]
+        task_col_start = shared_columns + task_id * topk_nonshared
+        task_col_end = task_col_start + topk_nonshared
+
+        # Extract task columns: (batch, topk_nonshared, memory_dim)
+        x_task = jax.lax.dynamic_slice(
+            x,
+            (0, task_col_start, 0),
+            (batch_size, topk_nonshared, memory_dim),
+        )
+        # Flatten: (batch, topk_nonshared * memory_dim)
+        x_task_flat = x_task.reshape(batch_size, -1)
+
+        # Project using task-specific weights: (batch, task_dim)
+        # Use lax.switch for JIT-compatible task selection
+        def get_task_output(t):
+            return (
+                jnp.matmul(x_task_flat, params.weights[f"task_{t}"])
+                + params.biases[f"task_{t}_bias"]
+            )
+
+        # Create branches for each task
+        branches = [lambda t=t: get_task_output(t) for t in range(num_tasks)]
+        task_out = jax.lax.switch(task_id, branches)
+
+        # === Combine pathways ===
+        # Output: (batch, shared_dim + task_dim)
+        output = jnp.concatenate([shared_out, task_out], axis=-1)
+
+        # Apply activation
+        activation = node_info.activation
+        z_mu = type(activation).forward(output, activation.config)
+
+        # Compute error
+        error = state.z_latent - z_mu
+        state = state._replace(
+            pre_activation=output,
+            z_mu=z_mu,
+            error=error,
+        )
+
+        node_class = node_info.node_class
+        state = node_class.energy_functional(state, node_info)
+        total_energy = jnp.sum(state.energy)
+
+        return total_energy, state

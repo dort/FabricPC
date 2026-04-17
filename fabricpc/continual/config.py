@@ -62,6 +62,11 @@ class ColumnConfig:
     use_attention_aggregator: bool = (
         False  # Use ComposerNode (attention) instead of Linear for aggregation
     )
+    use_partitioned_aggregator: bool = (
+        False  # Use PartitionedAggregator with true architectural isolation
+    )
+    partitioned_shared_dim: int = 32  # Output neurons for shared pathway
+    partitioned_task_dim: int = 64  # Output neurons per task pathway
     attention_num_heads: int = 4  # Number of attention heads if using ComposerNode
     attention_num_layers: int = 1  # Number of attention layers if using ComposerNode
 

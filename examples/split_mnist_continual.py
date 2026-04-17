@@ -43,7 +43,7 @@ from fabricpc.core.initializers import (
 )
 
 from fabricpc.continual.config import make_config, ExperimentConfig
-from fabricpc.continual.nodes import ColumnNode, ComposerNode
+from fabricpc.continual.nodes import ColumnNode, ComposerNode, PartitionedAggregator
 from fabricpc.continual.data import SplitMnistLoader, build_split_mnist_loaders
 from fabricpc.continual.trainer import SequentialTrainer
 from fabricpc.continual.utils import (
@@ -98,8 +98,27 @@ def create_network_structure(config: ExperimentConfig, use_columns: bool = True)
         )
 
         aggregator_dim = config.columns.aggregator_dim
+        use_partitioned = config.columns.use_partitioned_aggregator
 
-        if use_attention:
+        if use_partitioned:
+            # Partitioned aggregator with TRUE architectural isolation
+            # Each task has dedicated weight matrices - no gradient flow between tasks
+            shared_dim = config.columns.partitioned_shared_dim
+            task_dim = config.columns.partitioned_task_dim
+            aggregator = PartitionedAggregator(
+                shape=(shared_dim + task_dim,),
+                name="aggregator",
+                num_tasks=config.num_tasks,
+                shared_columns=config.columns.shared_columns,
+                topk_nonshared=config.columns.topk_nonshared,
+                shared_dim=shared_dim,
+                task_dim=task_dim,
+                memory_dim=memory_dim,
+                activation=ReLUActivation(),
+                energy=GaussianEnergy(),
+                weight_init=NormalInitializer(mean=0.0, std=0.02),
+            )
+        elif use_attention:
             # Attention-based aggregator with task-specific routing
             # Uses self-attention over columns + task query for weighted aggregation
             aggregator = ComposerNode(
@@ -242,6 +261,11 @@ def main():
         default=5000.0,
         help="EWC regularization strength (default: 5000.0)",
     )
+    parser.add_argument(
+        "--partitioned",
+        action="store_true",
+        help="Use PartitionedAggregator with true architectural isolation between tasks",
+    )
     args = parser.parse_args()
 
     print("=" * 60)
@@ -267,6 +291,12 @@ def main():
         config.ewc.enable = True
         config.ewc.lambda_ewc = args.ewc_lambda
 
+    # Enable partitioned aggregator for true architectural isolation
+    if args.partitioned:
+        config.columns.use_partitioned_aggregator = True
+        # Disable attention if partitioned is selected
+        config.columns.use_attention_aggregator = False
+
     print(f"\nConfiguration:")
     print(f"  Training mode: {config.training.training_mode}")
     print(f"  Epochs per task: {config.training.epochs_per_task}")
@@ -277,9 +307,15 @@ def main():
     print(f"  Quick smoke: {args.quick_smoke}")
     print(f"  Column architecture: {not args.no_columns}")
     print(f"  Attention aggregator: {config.columns.use_attention_aggregator}")
+    print(f"  Partitioned aggregator: {config.columns.use_partitioned_aggregator}")
     print(
         f"  Columns: {config.columns.num_columns} (shared: {config.columns.shared_columns})"
     )
+    if config.columns.use_partitioned_aggregator:
+        print(
+            f"  Partitioned dims: shared={config.columns.partitioned_shared_dim}, "
+            f"task={config.columns.partitioned_task_dim}"
+        )
     print(f"  EWC enabled: {config.ewc.enable}")
     if config.ewc.enable:
         print(f"  EWC lambda: {config.ewc.lambda_ewc}")
