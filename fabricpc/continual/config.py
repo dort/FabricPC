@@ -46,9 +46,9 @@ class PatchConfig:
 class ColumnConfig:
     """Memory column configuration."""
 
-    num_columns: int = 32  # Total number of memory columns
+    num_columns: int = 22  # Total number of memory columns (2 shared + 5 tasks × 4)
     memory_dim: int = 64  # Dimension of each column's memory
-    shared_columns: int = 8  # Number of always-active shared columns
+    shared_columns: int = 2  # Number of always-active shared columns
     topk_nonshared: int = 4  # Number of non-shared columns to activate per task
     aggregator_dim: int = (
         128  # Output dimension of aggregator layer (partitioned by task)
