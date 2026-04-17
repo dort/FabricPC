@@ -43,7 +43,7 @@ from fabricpc.core.initializers import (
 )
 
 from fabricpc.continual.config import make_config, ExperimentConfig
-from fabricpc.continual.nodes import ColumnNode
+from fabricpc.continual.nodes import ColumnNode, ComposerNode
 from fabricpc.continual.data import SplitMnistLoader, build_split_mnist_loaders
 from fabricpc.continual.trainer import SequentialTrainer
 from fabricpc.continual.utils import (
@@ -69,6 +69,9 @@ def create_network_structure(config: ExperimentConfig, use_columns: bool = True)
         Each column has separate weights (col_X_proj), enabling gradient protection
         to freeze specific columns without affecting others.
 
+        If use_attention_aggregator=True, uses ComposerNode with attention-based
+        task routing instead of simple Linear aggregator.
+
     If use_columns=False:
         Uses standard Linear architecture (no column isolation):
         input (784) -> hidden1 (256) -> hidden2 (128) -> output (10)
@@ -80,6 +83,7 @@ def create_network_structure(config: ExperimentConfig, use_columns: bool = True)
         # Modular ColumnNode architecture for true column isolation
         num_columns = config.columns.num_columns
         memory_dim = config.columns.memory_dim
+        use_attention = config.columns.use_attention_aggregator
 
         # ColumnNode: separate weights per column (col_X_proj)
         # Each column processes the input independently
@@ -93,19 +97,32 @@ def create_network_structure(config: ExperimentConfig, use_columns: bool = True)
             weight_init=NormalInitializer(mean=0.0, std=0.02),
         )
 
-        # Aggregator: combines column outputs
-        # Input: flattened columns (num_columns * memory_dim)
-        # This layer learns to combine column outputs
-        # Output is partitioned among tasks for task-specific pathways
         aggregator_dim = config.columns.aggregator_dim
-        aggregator = Linear(
-            shape=(aggregator_dim,),
-            activation=ReLUActivation(),
-            energy=GaussianEnergy(),
-            name="aggregator",
-            weight_init=XavierInitializer(),
-            flatten_input=True,  # Flatten (num_columns, memory_dim) to (num_columns * memory_dim)
-        )
+
+        if use_attention:
+            # Attention-based aggregator with task-specific routing
+            # Uses self-attention over columns + task query for weighted aggregation
+            aggregator = ComposerNode(
+                shape=(aggregator_dim,),
+                name="aggregator",
+                num_heads=config.columns.attention_num_heads,
+                num_layers=config.columns.attention_num_layers,
+                num_tasks=config.num_tasks,
+                gate_temp=0.5,
+                activation=ReLUActivation(),
+                energy=GaussianEnergy(),
+                weight_init=NormalInitializer(mean=0.0, std=0.02),
+            )
+        else:
+            # Simple linear aggregator: flattens and projects columns
+            aggregator = Linear(
+                shape=(aggregator_dim,),
+                activation=ReLUActivation(),
+                energy=GaussianEnergy(),
+                name="aggregator",
+                weight_init=XavierInitializer(),
+                flatten_input=True,  # Flatten (num_columns, memory_dim) to (num_columns * memory_dim)
+            )
 
         # Output layer
         output = Linear(
@@ -117,16 +134,29 @@ def create_network_structure(config: ExperimentConfig, use_columns: bool = True)
         )
 
         # Build graph with column architecture
-        structure = graph(
-            nodes=[pixels, columns, aggregator, output],
-            edges=[
-                Edge(source=pixels, target=columns.slot("in")),
-                Edge(source=columns, target=aggregator.slot("in")),
-                Edge(source=aggregator, target=output.slot("in")),
-            ],
-            task_map=TaskMap(x=pixels, y=output),
-            inference=InferenceSGD(eta_infer=0.05, infer_steps=20),
-        )
+        if use_attention:
+            # ComposerNode receives columns directly (no flatten needed)
+            structure = graph(
+                nodes=[pixels, columns, aggregator, output],
+                edges=[
+                    Edge(source=pixels, target=columns.slot("in")),
+                    Edge(source=columns, target=aggregator.slot("in")),
+                    Edge(source=aggregator, target=output.slot("in")),
+                ],
+                task_map=TaskMap(x=pixels, y=output),
+                inference=InferenceSGD(eta_infer=0.05, infer_steps=20),
+            )
+        else:
+            structure = graph(
+                nodes=[pixels, columns, aggregator, output],
+                edges=[
+                    Edge(source=pixels, target=columns.slot("in")),
+                    Edge(source=columns, target=aggregator.slot("in")),
+                    Edge(source=aggregator, target=output.slot("in")),
+                ],
+                task_map=TaskMap(x=pixels, y=output),
+                inference=InferenceSGD(eta_infer=0.05, infer_steps=20),
+            )
     else:
         # Standard Linear architecture (no column isolation)
         hidden1 = Linear(
@@ -196,6 +226,11 @@ def main():
         action="store_true",
         help="Use standard Linear architecture instead of ColumnNode (disables column isolation)",
     )
+    parser.add_argument(
+        "--attention",
+        action="store_true",
+        help="Use attention-based aggregation (ComposerNode) instead of Linear",
+    )
     args = parser.parse_args()
 
     print("=" * 60)
@@ -210,6 +245,10 @@ def main():
     if args.epochs is not None:
         config.training.epochs_per_task = args.epochs
 
+    # Enable attention-based aggregation if requested
+    if args.attention:
+        config.columns.use_attention_aggregator = True
+
     print(f"\nConfiguration:")
     print(f"  Training mode: {config.training.training_mode}")
     print(f"  Epochs per task: {config.training.epochs_per_task}")
@@ -217,6 +256,7 @@ def main():
     print(f"  Task pairs: {config.task_pairs}")
     print(f"  Quick smoke: {args.quick_smoke}")
     print(f"  Column architecture: {not args.no_columns}")
+    print(f"  Attention aggregator: {config.columns.use_attention_aggregator}")
     print(
         f"  Columns: {config.columns.num_columns} (shared: {config.columns.shared_columns})"
     )

@@ -56,6 +56,11 @@ class ColumnConfig:
     partition_aggregator: bool = (
         False  # Disabled: partitioning prevents later tasks from learning
     )
+    use_attention_aggregator: bool = (
+        False  # Use ComposerNode (attention) instead of Linear for aggregation
+    )
+    attention_num_heads: int = 4  # Number of attention heads if using ComposerNode
+    attention_num_layers: int = 1  # Number of attention layers if using ComposerNode
 
 
 @dataclass

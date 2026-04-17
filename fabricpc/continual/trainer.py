@@ -412,6 +412,17 @@ class SequentialTrainer:
 
         return column_activities, column_assignments
 
+    def _set_composer_task_id(self, task_id: int) -> None:
+        """
+        Update the current task_id for ComposerNode attention routing.
+
+        This allows ComposerNode to use the correct task-specific query vectors
+        during inference without requiring explicit task_id input connections.
+        """
+        from fabricpc.continual.nodes import set_current_task_id
+
+        set_current_task_id(task_id)
+
     def _autotune_transition_thresholds(
         self,
         task_data: TaskData,
@@ -585,6 +596,9 @@ class SequentialTrainer:
         """
         task_id = task_data.task_id
         self.current_task_id = task_id
+
+        # Update task_id in ComposerNode config (for attention-based aggregation)
+        self._set_composer_task_id(task_id)
 
         if verbose:
             print(f"\n{'='*50}")
@@ -1009,6 +1023,9 @@ class SequentialTrainer:
         for task_data in tasks_to_eval:
             eval_task_id = task_data.task_id
             eval_key, self.rng_key = jax.random.split(self.rng_key)
+
+            # Set task_id in ComposerNode for proper attention routing
+            self._set_composer_task_id(eval_task_id)
 
             # Use task-masked evaluation to avoid output interference
             accuracy = self._evaluate_task_masked(task_data, eval_key)
@@ -1574,6 +1591,9 @@ class SequentialTrainer:
         """
         if task_id >= len(self.tasks):
             raise ValueError(f"Task {task_id} not yet trained")
+
+        # Set task_id in ComposerNode for proper attention routing
+        self._set_composer_task_id(task_id)
 
         task_data = self.tasks[task_id]
         eval_config = {"loss_type": "cross_entropy"}

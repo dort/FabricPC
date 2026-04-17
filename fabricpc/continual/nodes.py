@@ -22,6 +22,21 @@ from fabricpc.core.activations import (
 )
 from fabricpc.core.energy import GaussianEnergy
 
+# Module-level variable for current task_id (used by ComposerNode)
+# This is set by SequentialTrainer before training/evaluation
+_CURRENT_TASK_ID = 0
+
+
+def set_current_task_id(task_id: int) -> None:
+    """Set the current task ID for ComposerNode attention routing."""
+    global _CURRENT_TASK_ID
+    _CURRENT_TASK_ID = task_id
+
+
+def get_current_task_id() -> int:
+    """Get the current task ID for ComposerNode attention routing."""
+    return _CURRENT_TASK_ID
+
 
 class PatchEmbedNode(NodeBase, FlattenInputMixin):
     """
@@ -385,8 +400,18 @@ class ComposerNode(NodeBase):
         num_layers = config.get("num_layers", 1)
         num_tasks = config.get("num_tasks", 5)
 
-        # Get input dimensions
-        in_shape = input_shapes.get("in", (32, 64))
+        # Get input dimensions from edge connected to "in" slot
+        # input_shapes keys are edge keys like "source->target:in"
+        in_shape = None
+        for edge_key, shape in input_shapes.items():
+            if ":in" in edge_key:
+                in_shape = shape
+                break
+
+        if in_shape is None:
+            # Fallback for backwards compatibility
+            in_shape = (32, 64)
+
         if len(in_shape) == 2:
             num_columns, input_dim = in_shape
         else:
@@ -472,7 +497,7 @@ class ComposerNode(NodeBase):
         batch_size = x.shape[0]
         num_columns = x.shape[1]
 
-        # Get task_id (as one-hot or scalar)
+        # Get task_id (as one-hot or scalar from input, or from module-level variable)
         task_id_input = inputs.get("task_id", None)
         if task_id_input is not None:
             if task_id_input.ndim == 2:  # One-hot
@@ -480,7 +505,8 @@ class ComposerNode(NodeBase):
             else:
                 task_id = task_id_input[0].astype(jnp.int32)
         else:
-            task_id = 0
+            # Fallback to module-level task_id (set by trainer via set_current_task_id)
+            task_id = get_current_task_id()
 
         # Get mask
         mask = inputs.get("mask", jnp.ones((batch_size, num_columns)))
