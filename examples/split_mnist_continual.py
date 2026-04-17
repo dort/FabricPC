@@ -231,6 +231,17 @@ def main():
         action="store_true",
         help="Use attention-based aggregation (ComposerNode) instead of Linear",
     )
+    parser.add_argument(
+        "--ewc",
+        action="store_true",
+        help="Enable EWC (Elastic Weight Consolidation) for reduced forgetting",
+    )
+    parser.add_argument(
+        "--ewc-lambda",
+        type=float,
+        default=5000.0,
+        help="EWC regularization strength (default: 5000.0)",
+    )
     args = parser.parse_args()
 
     print("=" * 60)
@@ -251,6 +262,11 @@ def main():
         # Use lower learning rate for attention stability
         config.training.learning_rate = 0.0003
 
+    # Enable EWC (Elastic Weight Consolidation) if requested
+    if args.ewc:
+        config.ewc.enable = True
+        config.ewc.lambda_ewc = args.ewc_lambda
+
     print(f"\nConfiguration:")
     print(f"  Training mode: {config.training.training_mode}")
     print(f"  Epochs per task: {config.training.epochs_per_task}")
@@ -264,6 +280,9 @@ def main():
     print(
         f"  Columns: {config.columns.num_columns} (shared: {config.columns.shared_columns})"
     )
+    print(f"  EWC enabled: {config.ewc.enable}")
+    if config.ewc.enable:
+        print(f"  EWC lambda: {config.ewc.lambda_ewc}")
 
     # Initialize JAX
     jax.config.update("jax_default_prng_impl", "threefry2x32")

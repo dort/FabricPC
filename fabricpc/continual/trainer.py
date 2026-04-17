@@ -41,6 +41,7 @@ from fabricpc.continual.gradient_protection import (
     GradientProtectionConfig,
     gradient_protection_transform,
 )
+from fabricpc.continual.ewc import EWCManager, ewc_gradient_transform
 
 
 @dataclass
@@ -219,7 +220,7 @@ class SequentialTrainer:
         )
         self.gradient_protector = GradientProtector(gradient_protection_config)
 
-        # Initialize optimizer (chain with gradient protection if enabled)
+        # Initialize optimizer (chain with gradient protection and EWC if enabled)
         if optimizer is None:
             base_optimizer = optax.adamw(
                 config.training.learning_rate,
@@ -228,12 +229,33 @@ class SequentialTrainer:
         else:
             base_optimizer = optimizer
 
-        # Chain gradient protection with optimizer for continual learning
+        # EWC (Elastic Weight Consolidation) for preventing catastrophic forgetting
+        # Initialize here so it's available for optimizer chain
+        self.ewc_manager = EWCManager(
+            lambda_ewc=config.ewc.lambda_ewc,
+            online=config.ewc.online,
+            gamma=config.ewc.gamma,
+            normalize_fisher=config.ewc.normalize_fisher,
+        )
+        self._ewc_enabled = config.ewc.enable
+
+        # Build optimizer chain with continual learning components
+        # Order: EWC gradients -> gradient protection -> base optimizer
+        transforms = []
+
+        # Add EWC penalty gradients (pulls weights toward important values)
+        if self._ewc_enabled:
+            transforms.append(ewc_gradient_transform(self.ewc_manager))
+
+        # Add gradient protection (masks frozen columns/shells)
         if gradient_protection_enable:
-            self.optimizer = optax.chain(
-                gradient_protection_transform(self.gradient_protector),
-                base_optimizer,
-            )
+            transforms.append(gradient_protection_transform(self.gradient_protector))
+
+        # Add base optimizer
+        transforms.append(base_optimizer)
+
+        if len(transforms) > 1:
+            self.optimizer = optax.chain(*transforms)
         else:
             self.optimizer = base_optimizer
 
@@ -879,6 +901,11 @@ class SequentialTrainer:
             cb(task_id, summary)
 
         self.global_step += 1
+
+        # EWC: Consolidate knowledge after training this task
+        if self._ewc_enabled:
+            consolidate_key, self.rng_key = jax.random.split(self.rng_key)
+            self._consolidate_ewc(task_data, consolidate_key, verbose=verbose)
 
         if verbose:
             print(f"\nTask {task_id} complete:")
@@ -1838,3 +1865,56 @@ class SequentialTrainer:
             - last_composer_cost: Cost of last composer transfer
         """
         return self.transweave_manager.get_summary_stats()
+
+    def _consolidate_ewc(
+        self,
+        task_data: TaskData,
+        rng_key: jax.Array,
+        verbose: bool = False,
+    ) -> None:
+        """
+        Consolidate EWC knowledge after training a task.
+
+        Computes Fisher Information over the task's training data and
+        stores the optimal parameters to penalize future deviations.
+
+        Args:
+            task_data: The task that was just trained
+            rng_key: JAX random key for sampling
+            verbose: Whether to print progress
+        """
+        from fabricpc.training.train_backprop import compute_forward_pass, compute_loss
+
+        if verbose:
+            print(f"  Consolidating EWC for task {task_data.task_id}...")
+
+        # Create gradient function for Fisher computation
+        # This computes d(loss)/d(params) for each sample
+        structure = self.structure
+
+        def gradient_fn(params, batch, subkey):
+            """Compute gradients for EWC Fisher estimation."""
+
+            def loss_fn(p):
+                state = compute_forward_pass(p, structure, batch, subkey)
+                return compute_loss(
+                    state, batch["y"], structure.task_map["y"], "cross_entropy"
+                )
+
+            loss, grads = jax.value_and_grad(loss_fn)(params)
+            # Return (grads, energy, final_state) as expected by EWC
+            return grads, float(loss), None
+
+        # Consolidate with EWC manager
+        self.ewc_manager.consolidate_task(
+            params=self.params,
+            gradient_fn=gradient_fn,
+            data_loader=task_data.train_loader,
+            num_samples=self.config.ewc.fisher_samples,
+            rng_key=rng_key,
+        )
+
+        if verbose:
+            print(f"    Tasks consolidated: {self.ewc_manager.state.num_tasks}")
+            print(f"    Fisher max: {self.ewc_manager.state.fisher_max:.6f}")
+            print(f"    Fisher mean: {self.ewc_manager.state.fisher_mean:.6f}")

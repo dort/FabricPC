@@ -505,6 +505,23 @@ class PerWeightCausalConfig:
 
 
 @dataclass
+class EWCConfig:
+    """
+    Elastic Weight Consolidation (EWC) configuration.
+
+    EWC prevents catastrophic forgetting by penalizing changes to weights
+    that are important for previous tasks, measured via Fisher Information.
+    """
+
+    enable: bool = False  # Enable EWC regularization
+    lambda_ewc: float = 5000.0  # EWC regularization strength
+    fisher_samples: int = 200  # Number of samples for Fisher estimation
+    online: bool = True  # Use online EWC (running Fisher) vs offline (per-task Fisher)
+    gamma: float = 0.95  # Decay for online Fisher (importance of older tasks)
+    normalize_fisher: bool = True  # Normalize Fisher by max value for stability
+
+
+@dataclass
 class ExperimentConfig:
     """
     Master configuration for Split-MNIST continual learning experiment.
@@ -539,6 +556,7 @@ class ExperimentConfig:
     per_weight_causal: PerWeightCausalConfig = field(
         default_factory=PerWeightCausalConfig
     )
+    ewc: EWCConfig = field(default_factory=EWCConfig)
 
     # Task configuration
     num_tasks: int = 5
