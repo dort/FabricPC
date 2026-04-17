@@ -36,7 +36,11 @@ from fabricpc.core.activations import (
 )
 from fabricpc.core.energy import CrossEntropyEnergy, GaussianEnergy
 from fabricpc.core.inference import InferenceSGD
-from fabricpc.core.initializers import XavierInitializer, NormalInitializer
+from fabricpc.core.initializers import (
+    XavierInitializer,
+    NormalInitializer,
+    ZerosInitializer,
+)
 
 from fabricpc.continual.config import make_config, ExperimentConfig
 from fabricpc.continual.nodes import ColumnNode

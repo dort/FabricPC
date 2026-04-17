@@ -214,7 +214,7 @@ class SequentialTrainer:
             ),  # Protected center, stable inner, disposable outer
             protect_inactive_columns=True,
             inactive_column_scale=0.0,  # Freeze inactive columns completely
-            shared_column_scale=0.0,  # Freeze shared columns too for maximum isolation
+            shared_column_scale=0.2,  # Moderate protection for shared columns
             max_gradient_norm=1.0,
         )
         self.gradient_protector = GradientProtector(gradient_protection_config)
@@ -619,11 +619,18 @@ class SequentialTrainer:
             active_classes=task_data.classes,
             num_output_classes=10,  # Split-MNIST has 10 classes
         )
-        # Set aggregator partitioning for task-specific pathways
-        self.gradient_protector.set_aggregator_config(
-            aggregator_dim=self.config.columns.aggregator_dim,
-            num_tasks=self.config.num_tasks,
-        )
+        # Set aggregator partitioning for task-specific pathways (if enabled)
+        if self.config.columns.partition_aggregator:
+            self.gradient_protector.set_aggregator_config(
+                aggregator_dim=self.config.columns.aggregator_dim,
+                num_tasks=self.config.num_tasks,
+            )
+        else:
+            # Disable aggregator partitioning
+            self.gradient_protector.set_aggregator_config(
+                aggregator_dim=self.config.columns.aggregator_dim,
+                num_tasks=0,  # num_tasks=0 disables partitioning
+            )
 
         # Get shell assignments from transweave manager if available
         shell_assignments = {}

@@ -390,14 +390,14 @@ class GradientProtector:
                     agg_output_mask = self.compute_aggregator_task_mask(output_dim)
 
                     if input_mask is not None and agg_output_mask is not None:
-                        # This is the aggregator - apply STRICT task isolation!
-                        # Only allow gradients where BOTH:
-                        # 1. Input is from active columns (non-shared, non-frozen)
+                        # This is the aggregator - allow learning task pathways
+                        # Gradients flow where BOTH:
+                        # 1. Input is from active OR shared columns (not frozen)
                         # 2. Output is current task's aggregator neurons
-                        # This prevents cross-task interference through the aggregator.
+                        # Shared columns allow the task to use learned features.
 
                         # Build a 2D mask: (input_dim, output_dim)
-                        # Set to 1.0 only for current task's columns -> current task's neurons
+                        # Current task can learn from shared + own columns -> own neurons
                         input_mask_jax = jnp.array(input_mask)
                         agg_output_mask_jax = jnp.array(agg_output_mask)
 
