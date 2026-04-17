@@ -248,11 +248,15 @@ def main():
     # Enable attention-based aggregation if requested
     if args.attention:
         config.columns.use_attention_aggregator = True
+        # Use lower learning rate for attention stability
+        config.training.learning_rate = 0.0003
 
     print(f"\nConfiguration:")
     print(f"  Training mode: {config.training.training_mode}")
     print(f"  Epochs per task: {config.training.epochs_per_task}")
     print(f"  Batch size: {config.training.batch_size}")
+    print(f"  Learning rate: {config.training.learning_rate}")
+    print(f"  Grad clip norm: {config.training.grad_clip_norm}")
     print(f"  Task pairs: {config.task_pairs}")
     print(f"  Quick smoke: {args.quick_smoke}")
     print(f"  Column architecture: {not args.no_columns}")
@@ -277,11 +281,20 @@ def main():
     print(f"  Edges: {len(structure.edges)}")
     print(f"  Parameters: {total_params:,}")
 
-    # Create optimizer
-    optimizer = optax.adamw(
-        config.training.learning_rate,
-        weight_decay=config.training.weight_decay,
-    )
+    # Create optimizer (with gradient clipping for attention mode)
+    if config.columns.use_attention_aggregator:
+        optimizer = optax.chain(
+            optax.clip_by_global_norm(config.training.grad_clip_norm),
+            optax.adamw(
+                config.training.learning_rate,
+                weight_decay=config.training.weight_decay,
+            ),
+        )
+    else:
+        optimizer = optax.adamw(
+            config.training.learning_rate,
+            weight_decay=config.training.weight_decay,
+        )
 
     # Create trainer
     trainer = SequentialTrainer(

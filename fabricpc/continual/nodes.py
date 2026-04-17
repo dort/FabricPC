@@ -565,14 +565,10 @@ class ComposerNode(NodeBase):
                 params.biases[f"ln_{layer + 1}_shift"],
             )
 
-        # Compute gate probabilities
-        task_query = params.weights["task_queries"][task_id]  # (hidden_dim,)
-        query_scores = jnp.sum(x * task_query[None, None, :], axis=-1) / jnp.sqrt(
-            hidden_dim
-        )
-        gate_logits = (
-            jnp.matmul(x, params.weights["gate_proj"]).squeeze(-1) + query_scores
-        )
+        # Compute gate probabilities using mask-based gating (no task-specific queries)
+        # This avoids JAX JIT issues with task_id being captured as a constant
+        # The mask already encodes which columns are active for the current task
+        gate_logits = jnp.matmul(x, params.weights["gate_proj"]).squeeze(-1)
         gate_logits = jnp.where(mask > 0, gate_logits, -1e9)
         gate_probs = jax.nn.softmax(gate_logits / gate_temp, axis=-1)
 

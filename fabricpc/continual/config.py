@@ -17,6 +17,9 @@ class TrainingConfig:
     batch_size: int = 256
     learning_rate: float = 0.001
     weight_decay: float = 0.1
+    grad_clip_norm: float = (
+        1.0  # Gradient clipping for stability (especially attention)
+    )
 
     # Device selection
     device: str = "cuda"  # "cuda", "cpu", or specific like "cuda:0"
