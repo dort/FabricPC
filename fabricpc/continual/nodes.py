@@ -5,7 +5,7 @@ Implements specialized nodes for the hierarchical column-based architecture
 used in Split-MNIST continual learning experiments.
 """
 
-from typing import Dict, Any, Tuple, Optional
+from typing import Dict, Any, Tuple, Optional, Sequence
 import math
 import jax
 import jax.numpy as jnp
@@ -22,9 +22,11 @@ from fabricpc.core.activations import (
 )
 from fabricpc.core.energy import GaussianEnergy
 
-# Module-level variable for current task_id (used by ComposerNode)
-# This is set by SequentialTrainer before training/evaluation
+# Module-level variables for current task context.
+# These are set by SequentialTrainer before training/evaluation so continual
+# routing remains active even when the graph has no explicit task/mask edges.
 _CURRENT_TASK_ID = 0
+_CURRENT_SUPPORT_COLS: Optional[Tuple[int, ...]] = None
 
 
 def set_current_task_id(task_id: int) -> None:
@@ -36,6 +38,27 @@ def set_current_task_id(task_id: int) -> None:
 def get_current_task_id() -> int:
     """Get the current task ID for ComposerNode attention routing."""
     return _CURRENT_TASK_ID
+
+
+def set_current_support_cols(active_columns: Sequence[int] | None) -> None:
+    """Set the active support columns for continual routing."""
+    global _CURRENT_SUPPORT_COLS
+    if active_columns is None:
+        _CURRENT_SUPPORT_COLS = None
+    else:
+        _CURRENT_SUPPORT_COLS = tuple(int(col) for col in active_columns)
+
+
+def get_current_support_mask(batch_size: int, num_columns: int) -> jnp.ndarray:
+    """Build a batch mask from the current support selection."""
+    if _CURRENT_SUPPORT_COLS is None:
+        return jnp.ones((batch_size, num_columns), dtype=jnp.float32)
+
+    mask = np.zeros((batch_size, num_columns), dtype=np.float32)
+    for col_idx in _CURRENT_SUPPORT_COLS:
+        if 0 <= col_idx < num_columns:
+            mask[:, col_idx] = 1.0
+    return jnp.array(mask)
 
 
 class PatchEmbedNode(NodeBase, FlattenInputMixin):
@@ -296,7 +319,7 @@ class ColumnNode(NodeBase):
         # Get optional mask
         mask = inputs.get("mask", None)
         if mask is None:
-            mask = jnp.ones((batch_size, num_columns))
+            mask = get_current_support_mask(batch_size, num_columns)
 
         # Compute column outputs
         col_outputs = []
@@ -509,7 +532,9 @@ class ComposerNode(NodeBase):
             task_id = get_current_task_id()
 
         # Get mask
-        mask = inputs.get("mask", jnp.ones((batch_size, num_columns)))
+        mask = inputs.get("mask", None)
+        if mask is None:
+            mask = get_current_support_mask(batch_size, num_columns)
 
         # Input projection
         x = (

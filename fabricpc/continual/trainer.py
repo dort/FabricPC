@@ -283,6 +283,7 @@ class SequentialTrainer:
 
         # Accuracy matrix: accuracy[trained_up_to_task][evaluated_on_task]
         self._accuracy_matrix: Dict[int, Dict[int, float]] = {}
+        self._task_supports: Dict[int, Tuple[int, ...]] = {}
 
         # Per-weight causal learning
         self.per_weight_causal = PerWeightCausalLearner(
@@ -444,6 +445,23 @@ class SequentialTrainer:
         from fabricpc.continual.nodes import set_current_task_id
 
         set_current_task_id(task_id)
+
+    def _set_support_context(self, support_cols: Optional[Tuple[int, ...]]) -> None:
+        """Update the active support columns for continual routing."""
+        from fabricpc.continual.nodes import set_current_support_cols
+
+        set_current_support_cols(support_cols)
+
+    def _set_task_context(
+        self,
+        task_id: int,
+        support_cols: Optional[Tuple[int, ...]] = None,
+    ) -> None:
+        """Update task-level routing context used by continual nodes."""
+        self._set_composer_task_id(task_id)
+        if support_cols is None:
+            support_cols = self._task_supports.get(task_id)
+        self._set_support_context(support_cols)
 
     def _autotune_transition_thresholds(
         self,
@@ -619,9 +637,6 @@ class SequentialTrainer:
         task_id = task_data.task_id
         self.current_task_id = task_id
 
-        # Update task_id in ComposerNode config (for attention-based aggregation)
-        self._set_composer_task_id(task_id)
-
         if verbose:
             print(f"\n{'='*50}")
             print(f"Training Task {task_id}: classes {task_data.classes}")
@@ -630,6 +645,8 @@ class SequentialTrainer:
         # Select support columns
         support_state = self.support_manager.select_support_for_task(task_id)
         support_cols = support_state.active_all
+        self._task_supports[task_id] = support_cols
+        self._set_task_context(task_id, support_cols)
         self._autotune_transition_thresholds(
             task_data=task_data,
             active_cols=support_cols,
@@ -745,7 +762,7 @@ class SequentialTrainer:
         train_key, self.rng_key = jax.random.split(self.rng_key)
 
         if self.training_mode == "backprop":
-            self.params, loss_history, _ = train_backprop(
+            self.params, loss_history, _, self.opt_state = train_backprop(
                 params=self.params,
                 structure=self.structure,
                 train_loader=train_loader,
@@ -754,9 +771,11 @@ class SequentialTrainer:
                 rng_key=train_key,
                 verbose=verbose,
                 epoch_callback=epoch_callback,
+                opt_state=self.opt_state,
+                return_opt_state=True,
             )
         else:  # PC mode or hybrid (default to PC)
-            self.params, energy_history, _ = train_pcn(
+            self.params, energy_history, _, self.opt_state = train_pcn(
                 params=self.params,
                 structure=self.structure,
                 train_loader=train_loader,
@@ -765,6 +784,8 @@ class SequentialTrainer:
                 rng_key=train_key,
                 verbose=verbose,
                 epoch_callback=epoch_callback,
+                opt_state=self.opt_state,
+                return_opt_state=True,
             )
 
         training_time = time.time() - start_time
@@ -1052,7 +1073,8 @@ class SequentialTrainer:
             eval_key, self.rng_key = jax.random.split(self.rng_key)
 
             # Set task_id in ComposerNode for proper attention routing
-            self._set_composer_task_id(eval_task_id)
+            support_cols = self._task_supports.get(eval_task_id)
+            self._set_task_context(eval_task_id, support_cols)
 
             # Use task-masked evaluation to avoid output interference
             accuracy = self._evaluate_task_masked(task_data, eval_key)
@@ -1620,7 +1642,7 @@ class SequentialTrainer:
             raise ValueError(f"Task {task_id} not yet trained")
 
         # Set task_id in ComposerNode for proper attention routing
-        self._set_composer_task_id(task_id)
+        self._set_task_context(task_id)
 
         task_data = self.tasks[task_id]
         eval_config = {"loss_type": "cross_entropy"}
@@ -1658,15 +1680,28 @@ class SequentialTrainer:
         # Convert params to numpy for serialization
         params_np = jax.tree_util.tree_map(np.array, self.params)
 
+        def pack_object(value: Any) -> np.ndarray:
+            payload = np.empty((), dtype=object)
+            payload[()] = value
+            return payload
+
+        opt_state_np = pack_object(jax.tree_util.tree_map(np.array, self.opt_state))
+
         checkpoint = {
             "params": params_np,
+            "opt_state": opt_state_np,
             "global_step": self.global_step,
             "current_task_id": self.current_task_id,
-            "summaries": [s.to_dict() for s in self.summaries],
-            "accuracy_matrix": {str(k): v for k, v in self._accuracy_matrix.items()},
-            "support_manager": self.support_manager.save_state(),
+            "summaries": pack_object([s.to_dict() for s in self.summaries]),
+            "accuracy_matrix": pack_object(
+                {str(k): v for k, v in self._accuracy_matrix.items()}
+            ),
+            "task_supports": pack_object(
+                {str(k): v for k, v in self._task_supports.items()}
+            ),
+            "support_manager": pack_object(self.support_manager.save_state()),
             "rng_key": np.array(self.rng_key),
-            "transweave": self.transweave_manager.save_state(),
+            "transweave": pack_object(self.transweave_manager.save_state()),
         }
 
         np.savez_compressed(str(path), **checkpoint)
@@ -1695,7 +1730,12 @@ class SequentialTrainer:
 
         # Restore params
         self.params = jax.tree_util.tree_map(jnp.array, checkpoint["params"].item())
-        self.opt_state = self.optimizer.init(self.params)
+        if "opt_state" in checkpoint:
+            self.opt_state = jax.tree_util.tree_map(
+                jnp.array, checkpoint["opt_state"][()]
+            )
+        else:
+            self.opt_state = self.optimizer.init(self.params)
 
         # Restore state
         self.global_step = int(checkpoint["global_step"])
@@ -1704,19 +1744,28 @@ class SequentialTrainer:
 
         # Restore accuracy matrix
         self._accuracy_matrix = {
-            int(k): v for k, v in checkpoint["accuracy_matrix"].item().items()
+            int(k): v for k, v in checkpoint["accuracy_matrix"][()].items()
         }
+        if "task_supports" in checkpoint:
+            self._task_supports = {
+                int(k): tuple(v) for k, v in checkpoint["task_supports"][()].items()
+            }
+        else:
+            self._task_supports = {}
 
         # Restore support manager
-        self.support_manager.load_state(checkpoint["support_manager"].item())
+        self.support_manager.load_state(checkpoint["support_manager"][()])
 
         # Restore TransWeave state if present
         if "transweave" in checkpoint:
-            self.transweave_manager.load_state(checkpoint["transweave"].item())
+            self.transweave_manager.load_state(checkpoint["transweave"][()])
+
+        if self.current_task_id >= 0:
+            self._set_task_context(self.current_task_id)
 
         # Restore summaries
         self.summaries = []
-        for s in checkpoint["summaries"].item():
+        for s in checkpoint["summaries"][()]:
             self.summaries.append(
                 TaskRunSummary(
                     task_id=s["task_id"],

@@ -5,7 +5,7 @@ This module implements training with local gradient computation for each node,
 as required for true predictive coding with local learning rules.
 """
 
-from typing import Dict, Tuple, Any, cast, List
+from typing import Dict, Tuple, Any, cast, List, Optional
 import math
 import jax
 import jax.numpy as jnp
@@ -125,7 +125,12 @@ def train_pcn(
     verbose: bool = True,
     epoch_callback=None,
     iter_callback=None,
-) -> Tuple[GraphParams, List[Any], List[Any]]:
+    opt_state: Optional[optax.OptState] = None,
+    return_opt_state: bool = False,
+) -> (
+    Tuple[GraphParams, List[Any], List[Any]]
+    | Tuple[GraphParams, List[Any], List[Any], optax.OptState]
+):
     """
     Main training loop for predictive coding network with local learning.
 
@@ -158,7 +163,8 @@ def train_pcn(
         ... }
         >>> trained_params = train_pcn(params, structure, train_loader, optimizer, train_config, train_key)
     """
-    opt_state = optimizer.init(params)
+    if opt_state is None:
+        opt_state = optimizer.init(params)
 
     # Training hyperparameters
     num_epochs = config.get("num_epochs", 10)  # supports float (e.g. 1.5)
@@ -241,6 +247,8 @@ def train_pcn(
         if verbose:
             print(f"Epoch {epoch_idx + 1}/{total_epochs}, energy: {avg_energy:.4f}")
 
+    if return_opt_state:
+        return params, iter_results, epoch_results, opt_state
     return params, iter_results, epoch_results
 
 
