@@ -1,13 +1,38 @@
+import re
 import numpy as np
 from fabricpc.utils.data.data_utils import one_hot, split_np_seed
 
 
-class MnistLoader:
-    """JAX-compatible data loader using TensorFlow Datasets.
+def _parse_mnist_split(split: str, train_n: int, test_n: int):
+    """Parse a tfds-style split string for the numpy fallback.
 
-    Provides the same interface as PyTorch DataLoader but uses tfds
-    data parallelism based on C++ that bypasses GIL and does not inherit GPU state.
-    Avoids os.fork warnings with JAX.
+    Supports 'train', 'test', and percentage slices like 'train[:80%]' or
+    'train[80%:]'. Returns (base_split, start_idx, end_idx).
+    """
+    m = re.fullmatch(r"(train|test)(?:\[(\d*)%?:(\d*)%?\])?", split.replace(" ", ""))
+    if m is None:
+        raise ValueError(
+            f"Unsupported split '{split}' for MNIST fallback loader "
+            "(expected 'train', 'test', or percentage slice like 'train[:80%]')."
+        )
+    base, start_s, end_s = m.group(1), m.group(2), m.group(3)
+    total = train_n if base == "train" else test_n
+    # When no slice is provided, groups 2 and 3 are both None.
+    if start_s is None and end_s is None:
+        return base, 0, total
+    start = int(round(int(start_s) / 100 * total)) if start_s else 0
+    end = int(round(int(end_s) / 100 * total)) if end_s else total
+    return base, start, end
+
+
+class MnistLoader:
+    """JAX-compatible MNIST data loader.
+
+    Primary path uses TensorFlow Datasets for C++-parallel, GIL-free reads
+    (avoids os.fork warnings with JAX). If TFDS is unavailable or fails
+    (missing deps, protobuf/TFDS incompatibilities, no network), falls back
+    to a numpy loader that downloads raw MNIST via the helpers in
+    `fabricpc.continual.data`.
 
     Args:
         split: Dataset split to load. Use 'train' for training data or
@@ -31,21 +56,34 @@ class MnistLoader:
         normalize_mean: float = 0.1307,
         normalize_std: float = 0.3081,
     ):
-        import tensorflow_datasets as tfds
-        import tensorflow as tf
-
-        # Disable GPU for TensorFlow (we only use it for data loading)
-        tf.config.set_visible_devices([], "GPU")
-
+        self.split = split
         self.batch_size = batch_size
         self.shuffle = shuffle
         self.seed = seed
         self.tensor_format = tensor_format
         self.normalize_mean = normalize_mean
         self.normalize_std = normalize_std
+        self._use_tfds = False
+
+        try:
+            self._init_tfds(split)
+            self._use_tfds = True
+        except Exception as e:
+            print(
+                f"TFDS MNIST load failed ({type(e).__name__}: {e}); "
+                "falling back to numpy loader."
+            )
+            self._init_numpy(split)
+
+    def _init_tfds(self, split: str):
+        import tensorflow_datasets as tfds
+        import tensorflow as tf
+
+        # Disable GPU for TensorFlow (we only use it for data loading)
+        tf.config.set_visible_devices([], "GPU")
 
         # Split seed into two independent seeds for file and buffer shuffling
-        file_seed, buffer_seed = split_np_seed(seed, n=2)
+        file_seed, buffer_seed = split_np_seed(self.seed, n=2)
 
         # Configure read options for reproducibility
         read_config = tfds.ReadConfig(
@@ -60,22 +98,53 @@ class MnistLoader:
             with_info=True,
             as_supervised=True,
             read_config=read_config,
-            shuffle_files=shuffle and seed is not None,
+            shuffle_files=self.shuffle and self.seed is not None,
         )
         self.num_examples = info.splits[split].num_examples
-        self._num_batches = (self.num_examples + batch_size - 1) // batch_size
+        self._num_batches = (self.num_examples + self.batch_size - 1) // self.batch_size
 
         # Build pipeline
-        if shuffle:
+        if self.shuffle:
             ds = ds.shuffle(
                 buffer_size=self.num_examples, seed=buffer_seed
             )  # mnist fits in memory (~60MB) so the buffer is the full dataset
-        ds = ds.batch(batch_size, drop_remainder=False)
+        ds = ds.batch(self.batch_size, drop_remainder=False)
         ds = ds.prefetch(tf.data.AUTOTUNE)
 
         self.ds = ds
 
+    def _init_numpy(self, split: str):
+        # Reuse the robust Keras/manual download path already used by the
+        # continual-learning Split-MNIST loader.
+        from fabricpc.continual.data import _load_mnist_keras, _load_mnist_manual
+
+        result = _load_mnist_keras()
+        if result is None:
+            result = _load_mnist_manual("./data")
+        train_images, train_labels, test_images, test_labels = result
+
+        base, start, end = _parse_mnist_split(
+            split, train_n=len(train_images), test_n=len(test_images)
+        )
+        if base == "train":
+            images, labels = train_images[start:end], train_labels[start:end]
+        else:
+            images, labels = test_images[start:end], test_labels[start:end]
+
+        # Match TFDS shape: (N, 28, 28, 1) uint8-equivalent float in [0, 255]
+        # before the per-batch /255 normalisation done in __iter__.
+        self._np_images = images[..., np.newaxis].astype(np.float32)
+        self._np_labels = labels.astype(np.int64)
+        self.num_examples = len(self._np_images)
+        self._num_batches = (self.num_examples + self.batch_size - 1) // self.batch_size
+
     def __iter__(self):
+        if self._use_tfds:
+            yield from self._iter_tfds()
+        else:
+            yield from self._iter_numpy()
+
+    def _iter_tfds(self):
         for images, labels in self.ds:
             # Convert to numpy, normalize, and flatten
             images = images.numpy().astype(np.float32) / 255.0
@@ -88,6 +157,27 @@ class MnistLoader:
             # One-hot encode labels
             labels = one_hot(labels.numpy(), num_classes=10)
 
+            yield images, labels
+
+    def _iter_numpy(self):
+        indices = np.arange(self.num_examples)
+        if self.shuffle:
+            # Derive a fresh epoch seed the same way the TFDS path's buffer
+            # shuffle does, so that seeded runs are reproducible across epochs.
+            epoch_seed = None
+            if self.seed is not None:
+                epoch_seed = int(self.seed) + getattr(self, "_epoch", 0)
+            rng = np.random.default_rng(epoch_seed)
+            rng.shuffle(indices)
+            self._epoch = getattr(self, "_epoch", 0) + 1
+
+        for start in range(0, self.num_examples, self.batch_size):
+            batch_idx = indices[start : start + self.batch_size]
+            images = self._np_images[batch_idx] / 255.0
+            images = (images - self.normalize_mean) / self.normalize_std
+            if self.tensor_format == "flat":
+                images = images.reshape(images.shape[0], -1)
+            labels = one_hot(self._np_labels[batch_idx], num_classes=10)
             yield images, labels
 
     def __len__(self):
