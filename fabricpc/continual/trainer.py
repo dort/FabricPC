@@ -670,7 +670,7 @@ class SequentialTrainer:
         # Set active classes for output layer gradient masking
         self.gradient_protector.set_active_classes(
             active_classes=task_data.classes,
-            num_output_classes=10,  # Split-MNIST has 10 classes
+            num_output_classes=getattr(self.config, "num_output_classes", 10),
         )
         # Set aggregator partitioning for task-specific pathways (if enabled)
         if self.config.columns.partition_aggregator:

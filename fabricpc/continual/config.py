@@ -565,7 +565,8 @@ class ExperimentConfig:
 
     # Task configuration
     num_tasks: int = 5
-    task_pairs: Tuple[Tuple[int, int], ...] = ((0, 1), (2, 3), (4, 5), (6, 7), (8, 9))
+    task_pairs: Tuple[Tuple[int, ...], ...] = ((0, 1), (2, 3), (4, 5), (6, 7), (8, 9))
+    num_output_classes: int = 10  # 10 for MNIST/CIFAR-10, 100 for CIFAR-100
 
     # Random seed
     seed: int = 0
