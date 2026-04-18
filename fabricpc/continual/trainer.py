@@ -851,7 +851,7 @@ class SequentialTrainer:
         per_weight_stats = self.per_weight_causal.get_stats()
 
         # Register end-of-task state with TransWeave for transfer learning
-        transweave_stats = self._register_transweave_task_end(task_id)
+        transweave_stats = self._register_transweave_task_end(task_data)
 
         # Create summary
         summary = TaskRunSummary(
@@ -1081,6 +1081,295 @@ class SequentialTrainer:
 
             self._accuracy_matrix[current_task_id][eval_task_id] = accuracy
 
+    def _collect_batches(
+        self,
+        loader,
+        max_batches: int,
+    ) -> List[Tuple[np.ndarray, np.ndarray]]:
+        """Collect up to `max_batches` batches from a loader."""
+        batches = []
+        for batch_idx, batch_data in enumerate(loader):
+            if batch_idx >= max_batches:
+                break
+            if isinstance(batch_data, (list, tuple)):
+                images, labels = batch_data
+            elif isinstance(batch_data, dict):
+                images = batch_data.get("x")
+                labels = batch_data.get("y")
+            else:
+                continue
+            batches.append((np.asarray(images), np.asarray(labels)))
+        return batches
+
+    def _coalesce_batches(
+        self,
+        batches: List[Tuple[np.ndarray, np.ndarray]],
+    ) -> List[Tuple[np.ndarray, np.ndarray]]:
+        """Collapse sampled batches into one large batch to bound evaluation cost."""
+        if not batches:
+            return []
+        if len(batches) == 1:
+            return list(batches)
+        images = np.concatenate([images for images, _ in batches], axis=0)
+        labels = np.concatenate([labels for _, labels in batches], axis=0)
+        return [(images, labels)]
+
+    def _compute_batch_state(
+        self,
+        batch: Dict[str, jnp.ndarray],
+        rng_key: jax.Array,
+    ):
+        """Compute a model state for a single batch under the current task context."""
+        if self.training_mode == "backprop":
+            from fabricpc.training.train_backprop import compute_forward_pass
+
+            return compute_forward_pass(self.params, self.structure, batch, rng_key)
+
+        from fabricpc.graph.state_initializer import initialize_graph_state
+        from fabricpc.core.inference import run_inference
+
+        batch_size = batch["x"].shape[0]
+        clamps = {}
+        if "x" in self.structure.task_map:
+            clamps[self.structure.task_map["x"]] = batch["x"]
+
+        state = initialize_graph_state(
+            self.structure,
+            batch_size,
+            rng_key,
+            clamps=clamps,
+            params=self.params,
+        )
+        return run_inference(self.params, state, clamps, self.structure)
+
+    def _evaluate_loss_on_batches(
+        self,
+        batches: List[Tuple[np.ndarray, np.ndarray]],
+        task_id: int,
+        support_cols: Tuple[int, ...],
+    ) -> float:
+        """Evaluate loss on sampled batches under a specific support selection."""
+        if not batches:
+            return 0.0
+
+        eval_loader = self._coalesce_batches(batches)
+        eval_key, self.rng_key = jax.random.split(self.rng_key)
+        self._set_task_context(task_id, support_cols)
+        eval_config = {"loss_type": "cross_entropy"}
+
+        if self.training_mode == "backprop":
+            metrics = evaluate_backprop(
+                self.params,
+                self.structure,
+                eval_loader,
+                eval_config,
+                eval_key,
+            )
+        else:
+            metrics = evaluate_pcn(
+                self.params,
+                self.structure,
+                eval_loader,
+                eval_config,
+                eval_key,
+            )
+
+        return float(metrics.get("loss", 0.0))
+
+    def _align_shell_assignments(
+        self,
+        assignments: np.ndarray,
+        num_neurons: int,
+    ) -> np.ndarray:
+        """Align shell assignments to the actual column width."""
+        assignments = np.asarray(assignments, dtype=np.int32)
+        if assignments.shape[0] == num_neurons:
+            return assignments
+        if assignments.shape[0] > num_neurons:
+            return assignments[:num_neurons]
+
+        if assignments.size == 0:
+            assignments = np.zeros((1,), dtype=np.int32)
+        pad_value = int(assignments[-1])
+        pad = np.full((num_neurons - assignments.shape[0],), pad_value, dtype=np.int32)
+        return np.concatenate([assignments, pad], axis=0)
+
+    def _default_shell_assignments(
+        self, num_neurons: Optional[int] = None
+    ) -> np.ndarray:
+        """Create default contiguous shell assignments for a fresh column."""
+        if num_neurons is None:
+            num_neurons = self.config.columns.memory_dim
+        shell_sizes = self.config.shell_demotion_transweave.shell_sizes
+        assignments = np.empty(sum(shell_sizes), dtype=np.int32)
+        start = 0
+        for shell_id, shell_size in enumerate(shell_sizes):
+            assignments[start : start + shell_size] = shell_id
+            start += shell_size
+        return self._align_shell_assignments(assignments, num_neurons)
+
+    def _measure_column_activities(
+        self,
+        task_id: int,
+        support_cols: Tuple[int, ...],
+        batches: List[Tuple[np.ndarray, np.ndarray]],
+    ) -> Dict[int, np.ndarray]:
+        """Measure per-column neuron activity from real forward passes."""
+        num_columns = self.config.columns.num_columns
+        num_neurons = self.config.columns.memory_dim
+        activity_sum = np.zeros((num_columns, num_neurons), dtype=np.float64)
+        batch_count = 0
+
+        for images, labels in self._coalesce_batches(batches):
+            batch = {"x": jnp.array(images), "y": jnp.array(labels)}
+            batch_key, self.rng_key = jax.random.split(self.rng_key)
+            self._set_task_context(task_id, support_cols)
+            state = self._compute_batch_state(batch, batch_key)
+            if "columns" not in state.nodes:
+                continue
+            column_z = np.asarray(state.nodes["columns"].z_mu)
+            activity_sum += np.mean(np.abs(column_z), axis=0)
+            batch_count += 1
+
+        if batch_count == 0:
+            return {
+                col_id: np.zeros((num_neurons,), dtype=np.float64)
+                for col_id in range(num_columns)
+            }
+
+        activity_mean = activity_sum / batch_count
+        return {col_id: activity_mean[col_id] for col_id in range(num_columns)}
+
+    def _extract_composer_summary(
+        self,
+        task_id: int,
+        support_cols: Tuple[int, ...],
+        batches: List[Tuple[np.ndarray, np.ndarray]],
+    ) -> Optional[Dict[str, Any]]:
+        """Extract measured composer state from the trained aggregator."""
+        aggregator_node = self.structure.nodes.get("aggregator")
+        if aggregator_node is None:
+            return None
+
+        node_class = aggregator_node.node_info.node_class
+        if getattr(node_class, "__name__", "") != "ComposerNode":
+            return None
+
+        params = self.params.nodes["aggregator"]
+        config = aggregator_node.node_info.node_config
+        hidden_dim = aggregator_node.node_info.shape[0]
+        num_heads = config.get("num_heads", 2)
+        num_layers = config.get("num_layers", 1)
+        head_dim = hidden_dim // max(num_heads, 1)
+        num_columns = self.config.columns.num_columns
+
+        attention_accum = []
+        gate_accum = []
+
+        support_mask = np.zeros((num_columns,), dtype=np.float32)
+        for col_idx in support_cols:
+            if 0 <= col_idx < num_columns:
+                support_mask[col_idx] = 1.0
+
+        for images, labels in self._coalesce_batches(batches):
+            batch = {"x": jnp.array(images), "y": jnp.array(labels)}
+            batch_key, self.rng_key = jax.random.split(self.rng_key)
+            self._set_task_context(task_id, support_cols)
+            state = self._compute_batch_state(batch, batch_key)
+            if "columns" not in state.nodes:
+                continue
+
+            x = np.asarray(state.nodes["columns"].z_mu)
+            mask = np.broadcast_to(support_mask[None, :], (x.shape[0], num_columns))
+
+            x_proj = np.matmul(
+                x, np.asarray(params.weights["input_proj"])
+            ) + np.asarray(params.biases["input_proj_bias"])
+            x_proj = np.asarray(
+                node_class._layer_norm(
+                    jnp.array(x_proj),
+                    params.weights["ln_0_scale"],
+                    params.biases["ln_0_shift"],
+                )
+            )
+
+            last_attn = None
+            for layer in range(num_layers):
+                q = np.matmul(x_proj, np.asarray(params.weights[f"layer_{layer}_q"]))
+                k = np.matmul(x_proj, np.asarray(params.weights[f"layer_{layer}_k"]))
+                v = np.matmul(x_proj, np.asarray(params.weights[f"layer_{layer}_v"]))
+
+                q = q.reshape(x.shape[0], num_columns, num_heads, head_dim).transpose(
+                    0, 2, 1, 3
+                )
+                k = k.reshape(x.shape[0], num_columns, num_heads, head_dim).transpose(
+                    0, 2, 1, 3
+                )
+                v = v.reshape(x.shape[0], num_columns, num_heads, head_dim).transpose(
+                    0, 2, 1, 3
+                )
+
+                scores = np.matmul(q, np.transpose(k, (0, 1, 3, 2))) / np.sqrt(
+                    max(head_dim, 1)
+                )
+                scores = np.where(mask[:, None, None, :] > 0, scores, -1e9)
+                attn = jax.nn.softmax(jnp.array(scores), axis=-1)
+                last_attn = np.asarray(attn)
+
+                out = np.matmul(last_attn, v)
+                out = out.transpose(0, 2, 1, 3).reshape(
+                    x.shape[0], num_columns, hidden_dim
+                )
+                out = np.matmul(
+                    out, np.asarray(params.weights[f"layer_{layer}_out"])
+                ) + np.asarray(params.biases[f"layer_{layer}_out_bias"])
+                x_proj = np.asarray(
+                    node_class._layer_norm(
+                        jnp.array(x_proj + out),
+                        params.weights[f"ln_{layer + 1}_scale"],
+                        params.biases[f"ln_{layer + 1}_shift"],
+                    )
+                )
+
+            if last_attn is None:
+                continue
+
+            gate_logits = np.matmul(
+                x_proj, np.asarray(params.weights["gate_proj"])
+            ).squeeze(-1)
+            gate_logits = np.where(mask > 0, gate_logits, -1e9)
+            attention_accum.append(np.mean(last_attn, axis=0))
+            gate_accum.append(np.mean(gate_logits, axis=0))
+
+        if not attention_accum:
+            return None
+
+        final_layer = num_layers - 1
+        query_proj = (
+            np.asarray(params.weights[f"layer_{final_layer}_q"])
+            .reshape(hidden_dim, num_heads, head_dim)
+            .transpose(1, 0, 2)
+        )
+        key_proj = (
+            np.asarray(params.weights[f"layer_{final_layer}_k"])
+            .reshape(hidden_dim, num_heads, head_dim)
+            .transpose(1, 0, 2)
+        )
+        value_proj = (
+            np.asarray(params.weights[f"layer_{final_layer}_v"])
+            .reshape(hidden_dim, num_heads, head_dim)
+            .transpose(1, 0, 2)
+        )
+
+        return {
+            "attention_weights": np.mean(np.stack(attention_accum, axis=0), axis=0),
+            "query_projections": query_proj,
+            "key_projections": key_proj,
+            "value_projections": value_proj,
+            "output_projection": np.asarray(params.weights["output_proj"]),
+            "gate_logits": np.mean(np.stack(gate_accum, axis=0), axis=0),
+        }
+
     def _run_support_swap_audit(
         self,
         current_task_data: TaskData,
@@ -1124,58 +1413,27 @@ class SequentialTrainer:
         max_batches = self.config.audit.support_audit_max_batches
 
         # Collect batches for evaluation
-        current_batches = []
-        for i, (images, labels) in enumerate(current_task_data.test_loader):
-            current_batches.append((images, labels))
-            if i + 1 >= max_batches:
-                break
-
-        old_batches = []
-        if old_task_data is not None:
-            for i, (images, labels) in enumerate(old_task_data.test_loader):
-                old_batches.append((images, labels))
-                if i + 1 >= max_batches:
-                    break
-
-        eval_config = {"loss_type": "cross_entropy"}
-
-        def coalesce_batches(batches):
-            """Collapse sampled audit batches into a single larger batch."""
-            if not batches:
-                return []
-            if len(batches) == 1:
-                return list(batches)
-            images = np.concatenate([images for images, _ in batches], axis=0)
-            labels = np.concatenate([labels for _, labels in batches], axis=0)
-            return [(images, labels)]
-
-        def eval_loss_on_batches(batches):
-            """Evaluate loss on a list of batches."""
-            if not batches:
-                return 0.0
-            eval_loader = coalesce_batches(batches)
-            eval_key, _ = jax.random.split(self.rng_key)
-            if self.training_mode == "backprop":
-                metrics = evaluate_backprop(
-                    self.params,
-                    self.structure,
-                    eval_loader,
-                    eval_config,
-                    eval_key,
-                )
-            else:
-                metrics = evaluate_pcn(
-                    self.params,
-                    self.structure,
-                    eval_loader,
-                    eval_config,
-                    eval_key,
-                )
-            return float(metrics.get("loss", 0.0))
+        current_batches = self._collect_batches(
+            current_task_data.test_loader, max_batches
+        )
+        old_batches = (
+            self._collect_batches(old_task_data.test_loader, max_batches)
+            if old_task_data is not None
+            else []
+        )
 
         # Baseline loss with current support
-        baseline_current_loss = eval_loss_on_batches(current_batches)
-        baseline_old_loss = eval_loss_on_batches(old_batches) if old_batches else 0.0
+        baseline_support = self.current_state.active_all
+        baseline_current_loss = self._evaluate_loss_on_batches(
+            current_batches, current_task_id, baseline_support
+        )
+        baseline_old_loss = (
+            self._evaluate_loss_on_batches(
+                old_batches, current_task_id, baseline_support
+            )
+            if old_batches
+            else 0.0
+        )
 
         if verbose:
             print(
@@ -1196,50 +1454,57 @@ class SequentialTrainer:
         if flat_swap_out.size == 0:
             return []
 
-        # Use dense column statistics to estimate contribution for all swaps at once.
-        # This remains an approximation, but the ranking path is now vectorized.
-        col_mean_acc = self.support_manager.support_bank.get_mean_accuracy_by_column(
-            self.config.columns.num_columns
-        )
-        default_acc = np.full_like(col_mean_acc, 0.5, dtype=np.float64)
-        has_history = col_mean_acc > 0
-        effective_acc = np.where(has_history, col_mean_acc, default_acc)
-
-        swap_out_score = effective_acc[flat_swap_out]
-        swap_in_score = effective_acc[flat_swap_in]
-        noise = np.random.normal(0.0, 0.01, size=flat_swap_out.shape[0])
-        estimated_gain = (swap_in_score - swap_out_score) * 0.1 + noise
-
-        alt_current_loss = baseline_current_loss - estimated_gain
-        alt_old_loss = baseline_old_loss - estimated_gain * 0.5
-
-        current_gain = baseline_current_loss - alt_current_loss
-        old_gain = baseline_old_loss - alt_old_loss
-
         current_weight = self.config.audit.support_audit_current_weight
         old_weight = self.config.audit.support_audit_old_weight
-        combined_gain = current_weight * current_gain + old_weight * old_gain
 
         old_task_id = old_task_data.task_id if old_task_data else None
         chosen_tuple = tuple(chosen)
 
         for i in range(flat_swap_out.shape[0]):
+            alt_nonshared = list(chosen)
+            swap_out = int(flat_swap_out[i])
+            swap_in = int(flat_swap_in[i])
+            swap_out_idx = alt_nonshared.index(swap_out)
+            alt_nonshared[swap_out_idx] = swap_in
+            alt_nonshared = tuple(sorted(alt_nonshared))
+            alt_support = (
+                tuple(range(self.config.columns.shared_columns)) + alt_nonshared
+            )
+
+            alt_current_loss = self._evaluate_loss_on_batches(
+                current_batches, current_task_id, alt_support
+            )
+            alt_old_loss = (
+                self._evaluate_loss_on_batches(
+                    old_batches, current_task_id, alt_support
+                )
+                if old_batches
+                else 0.0
+            )
+
+            current_gain = baseline_current_loss - alt_current_loss
+            old_gain = baseline_old_loss - alt_old_loss
+            combined_gain = current_weight * current_gain + old_weight * old_gain
+
             audit_rows.append(
                 {
-                    "swap_in": int(flat_swap_in[i]),
-                    "swap_out": int(flat_swap_out[i]),
+                    "swap_in": swap_in,
+                    "swap_out": swap_out,
                     "chosen_current_loss": float(baseline_current_loss),
-                    "alt_current_loss": float(alt_current_loss[i]),
+                    "alt_current_loss": float(alt_current_loss),
                     "chosen_old_loss": float(baseline_old_loss),
-                    "alt_old_loss": float(alt_old_loss[i]),
-                    "current_gain": float(current_gain[i]),
-                    "old_gain": float(old_gain[i]),
-                    "combined_gain": float(combined_gain[i]),
+                    "alt_old_loss": float(alt_old_loss),
+                    "current_gain": float(current_gain),
+                    "old_gain": float(old_gain),
+                    "combined_gain": float(combined_gain),
                     "current_task_id": current_task_id,
                     "old_task_id": old_task_id,
                     "chosen_support": chosen_tuple,
+                    "alt_support": alt_support,
                 }
             )
+
+        self._set_task_context(current_task_id, baseline_support)
 
         if verbose:
             print(f"  Generated {len(audit_rows)} audit rows")
@@ -1370,7 +1635,7 @@ class SequentialTrainer:
                                 actual_gain=float(row.get("combined_gain", 0.0)),
                             )
 
-    def _register_transweave_task_end(self, task_id: int) -> Dict[str, Any]:
+    def _register_transweave_task_end(self, task_data: TaskData) -> Dict[str, Any]:
         """
         Register end-of-task state with TransWeave for transfer learning.
 
@@ -1378,7 +1643,7 @@ class SequentialTrainer:
         to future tasks via Sinkhorn optimal transport.
 
         Args:
-            task_id: Completed task ID
+            task_data: Completed task metadata and loaders
 
         Returns:
             Dict with TransWeave statistics for this task
@@ -1391,191 +1656,106 @@ class SequentialTrainer:
             "shell_promotions": 0,
         }
 
+        task_id = task_data.task_id
         num_columns = self.config.columns.num_columns
-        num_heads = self.config.composer.num_heads
-        hidden_dim = self.config.composer.hidden_dim
-
-        # Generate synthetic composer state from current support configuration
-        # In a full implementation, these would come from actual model parameters
-        # For now, we create representative attention patterns based on support selection
         active_cols = self.current_state.active_all
-        num_active = len(active_cols)
-
-        # Create attention pattern that emphasizes active columns
-        attention_weights = np.zeros((num_heads, num_columns, num_columns))
-        for h in range(num_heads):
-            for col in active_cols:
-                # Attention from active columns to all others
-                attention_weights[h, col, :] = 1.0 / num_columns
-                # Self-attention bonus
-                attention_weights[h, col, col] += 0.5
-            # Normalize
-            attention_weights[h] = attention_weights[h] / (
-                attention_weights[h].sum(axis=1, keepdims=True) + 1e-10
-            )
-
-        # Create projection matrices with structure based on active columns
-        key_dim = hidden_dim // num_heads
-        query_projections = np.random.randn(num_heads, hidden_dim, key_dim) * 0.1
-        key_projections = np.random.randn(num_heads, hidden_dim, key_dim) * 0.1
-        value_projections = np.random.randn(num_heads, hidden_dim, key_dim) * 0.1
-        output_projection = np.random.randn(num_heads * key_dim, hidden_dim) * 0.1
+        measure_batches = max(1, self.config.audit.support_audit_max_batches)
+        measurement_batches = self._collect_batches(
+            task_data.test_loader, measure_batches
+        )
 
         # Register with composer TransWeave
         if self.config.composer_transweave.enable:
-            self.transweave_manager.composer_transweave.register_task(
+            composer_summary = self._extract_composer_summary(
                 task_id=task_id,
-                attention_weights=attention_weights,
-                query_projections=query_projections,
-                key_projections=key_projections,
-                value_projections=value_projections,
-                output_projection=output_projection,
+                support_cols=active_cols,
+                batches=measurement_batches,
             )
+            if composer_summary is not None:
+                self.transweave_manager.composer_transweave.register_task(
+                    task_id=task_id,
+                    attention_weights=composer_summary["attention_weights"],
+                    query_projections=composer_summary["query_projections"],
+                    key_projections=composer_summary["key_projections"],
+                    value_projections=composer_summary["value_projections"],
+                    output_projection=composer_summary["output_projection"],
+                    gate_logits=composer_summary["gate_logits"],
+                    metadata={
+                        "source": "measured",
+                        "num_batches": len(measurement_batches),
+                    },
+                )
 
-            # Compute transfer for this task (to measure what was transferred)
-            if task_id > 0:
-                transfer_result = (
-                    self.transweave_manager.composer_transweave.compute_transfer(
-                        target_task_id=task_id,
-                        current_attention=attention_weights,
-                        current_queries=query_projections,
-                        current_keys=key_projections,
-                        current_values=value_projections,
+                if task_id > 0:
+                    transfer_result = (
+                        self.transweave_manager.composer_transweave.compute_transfer(
+                            target_task_id=task_id,
+                            current_attention=composer_summary["attention_weights"],
+                            current_queries=composer_summary["query_projections"],
+                            current_keys=composer_summary["key_projections"],
+                            current_values=composer_summary["value_projections"],
+                        )
                     )
-                )
-                stats["composer_sources"] = len(transfer_result.source_tasks)
-                stats["composer_strength"] = transfer_result.transfer_strength
-                stats["composer_cost"] = transfer_result.diagnostics.get(
-                    "mean_transport_cost", 0.0
-                )
+                    stats["composer_sources"] = len(transfer_result.source_tasks)
+                    stats["composer_strength"] = transfer_result.transfer_strength
+                    stats["composer_cost"] = transfer_result.diagnostics.get(
+                        "mean_transport_cost", 0.0
+                    )
 
         # Register with shell demotion TransWeave
         if self.config.shell_demotion_transweave.enable:
-            shell_sizes = self.config.shell_demotion_transweave.shell_sizes
-            num_neurons = sum(shell_sizes)
-            num_shells = len(shell_sizes)
-
             # Update column usage history
             for col_id in active_cols:
                 if col_id not in self._column_usage_history:
                     self._column_usage_history[col_id] = []
                 self._column_usage_history[col_id].append(task_id)
 
-            # Track which columns were active in previous tasks
-            prev_active_cols = set()
-            for col_id, task_list in self._column_usage_history.items():
-                if any(t < task_id for t in task_list):
-                    prev_active_cols.add(col_id)
-
             # First, compute demotions BEFORE registering new states
             # This compares new activities against historical patterns
             total_demotions = 0
             total_promotions = 0
 
-            # Prepare current activities for all columns first
-            column_activities = {}
+            column_activities = self._measure_column_activities(
+                task_id=task_id,
+                support_cols=active_cols,
+                batches=measurement_batches,
+            )
             column_assignments = {}
-
             for col_id in range(num_columns):
-                # Determine column history
-                is_active_now = col_id in active_cols
-                was_active_before = col_id in prev_active_cols
-                is_declining = was_active_before and not is_active_now
-
-                # Get shell assignments from history if available, otherwise create fresh
                 history = self.transweave_manager.shell_transweave.column_histories.get(
                     col_id, []
                 )
                 if history:
-                    # Use persisted assignments from last task
-                    shell_assignments = history[-1].shell_assignments.copy()
+                    column_assignments[col_id] = self._align_shell_assignments(
+                        history[-1].shell_assignments,
+                        column_activities[col_id].shape[0],
+                    )
                 else:
-                    # Create fresh assignments for new columns
-                    shell_assignments = np.zeros(num_neurons, dtype=np.int32)
-                    shell_boundaries = [0]
-                    for size in shell_sizes:
-                        shell_boundaries.append(shell_boundaries[-1] + size)
-
-                    for i in range(num_neurons):
-                        for s in range(num_shells):
-                            if shell_boundaries[s] <= i < shell_boundaries[s + 1]:
-                                shell_assignments[i] = s
-                                break
-
-                # Create neuron activities with shell-dependent patterns
-                neuron_activities = np.zeros(num_neurons)
-
-                for s in range(num_shells):
-                    shell_mask = shell_assignments == s
-                    shell_neuron_count = np.sum(shell_mask)
-
-                    if shell_neuron_count == 0:
-                        continue
-
-                    # Base activity decreases from inner to outer shells
-                    shell_base = 0.8 - 0.25 * s  # 0.8, 0.55, 0.3
-
-                    if is_active_now:
-                        # Active column: boost inner, reduce outer
-                        if s == 0:
-                            activity = shell_base + 0.15
-                        elif s == num_shells - 1:
-                            activity = shell_base - 0.15  # More reduction in outer
-                        else:
-                            activity = shell_base
-                    elif is_declining:
-                        # Declining: significant drop, especially in outer shells
-                        decay_factor = 0.5 + 0.2 * s
-                        activity = shell_base * (1 - decay_factor)
-                    else:
-                        # Never active: low baseline
-                        activity = 0.15 + 0.05 * (num_shells - 1 - s)
-
-                    # Add noise and task-specific variation
-                    noise = np.random.randn(shell_neuron_count) * 0.12
-                    task_variation = (
-                        np.sin(task_id * 0.7 + col_id * 0.4 + s * 0.5) * 0.15
-                    )
-                    neuron_activities[shell_mask] = np.clip(
-                        activity + noise + task_variation, 0.05, 0.99
+                    column_assignments[col_id] = self._default_shell_assignments(
+                        column_activities[col_id].shape[0]
                     )
 
-                column_activities[col_id] = neuron_activities
-                column_assignments[col_id] = shell_assignments
-
-            # Compute demotions for columns with history (before registering new state)
-            # Check all columns that were previously registered, not just currently active
-            columns_to_check = list(
-                range(min(num_columns, 10))
-            )  # Check first 10 columns
-
-            for col_id in columns_to_check:
-                if col_id < num_columns:
-                    history = (
-                        self.transweave_manager.shell_transweave.column_histories.get(
-                            col_id, []
-                        )
+            for col_id in range(num_columns):
+                history = self.transweave_manager.shell_transweave.column_histories.get(
+                    col_id, []
+                )
+                if history:
+                    result = self.transweave_manager.shell_transweave.compute_demotion_transport(
+                        column_id=col_id,
+                        current_activities=column_activities[col_id],
+                        current_assignments=column_assignments[col_id],
                     )
-                    # Need at least 1 previous state to compare against
-                    if len(history) >= 1:
-                        result = self.transweave_manager.shell_transweave.compute_demotion_transport(
-                            column_id=col_id,
-                            current_activities=column_activities[col_id],
-                            current_assignments=column_assignments[col_id],
-                        )
-                        # Apply the transitions to actually modify shell assignments
-                        if result.demotion_candidates or result.promotion_candidates:
-                            new_assignments, counts = (
-                                self.transweave_manager.shell_transweave.apply_transitions(
-                                    column_assignments[col_id],
-                                    result,
-                                )
+                    if result.demotion_candidates or result.promotion_candidates:
+                        new_assignments, counts = (
+                            self.transweave_manager.shell_transweave.apply_transitions(
+                                column_assignments[col_id],
+                                result,
                             )
-                            column_assignments[col_id] = new_assignments
-                            total_demotions += counts["demotions_applied"]
-                            total_promotions += counts["promotions_applied"]
+                        )
+                        column_assignments[col_id] = new_assignments
+                        total_demotions += counts["demotions_applied"]
+                        total_promotions += counts["promotions_applied"]
 
-            # Now register the new states
             for col_id in range(num_columns):
                 self.transweave_manager.shell_transweave.register_shell_state(
                     column_id=col_id,
