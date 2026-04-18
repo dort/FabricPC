@@ -115,13 +115,43 @@ def _load_mnist_keras():
         return train_images, train_labels, test_images, test_labels
     except ImportError:
         return None
+    except Exception as e:
+        # Network / SSL failures (common on macOS python.org builds that lack
+        # system CA certs) should fall back to the manual downloader rather
+        # than crash the whole pipeline.
+        print(
+            f"Keras MNIST load failed ({type(e).__name__}: {e}); falling back to manual download."
+        )
+        return None
+
+
+def _build_ssl_opener():
+    """Return a urllib opener that verifies TLS using certifi when present.
+
+    On macOS Python installers from python.org, the default SSL context often
+    cannot find system CA certificates, so downloads from HTTPS hosts fail with
+    CERTIFICATE_VERIFY_FAILED. If `certifi` is installed, we use its CA bundle;
+    otherwise we fall back to the default context (unchanged behaviour).
+    """
+    import ssl
+    import urllib.request
+
+    try:
+        import certifi
+
+        context = ssl.create_default_context(cafile=certifi.where())
+    except ImportError:
+        context = ssl.create_default_context()
+
+    https_handler = urllib.request.HTTPSHandler(context=context)
+    return urllib.request.build_opener(https_handler)
 
 
 def _load_mnist_manual(data_root: str):
     """Load MNIST by downloading raw files if needed."""
     import os
     import gzip
-    import urllib.request
+    import shutil
 
     # Using PyTorch's S3 mirror since yann.lecun.com is no longer available
     mnist_urls = {
@@ -132,12 +162,14 @@ def _load_mnist_manual(data_root: str):
     }
 
     os.makedirs(data_root, exist_ok=True)
+    opener = _build_ssl_opener()
 
     def download_and_parse(url, filename, is_images=True):
         filepath = os.path.join(data_root, filename)
         if not os.path.exists(filepath):
             print(f"Downloading {filename}...")
-            urllib.request.urlretrieve(url, filepath)
+            with opener.open(url) as response, open(filepath, "wb") as out:
+                shutil.copyfileobj(response, out)
 
         with gzip.open(filepath, "rb") as f:
             if is_images:
