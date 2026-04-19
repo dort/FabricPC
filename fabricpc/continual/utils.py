@@ -524,7 +524,7 @@ def print_summary_table(summaries: Sequence[TaskRunSummary]):
 
     print(f"\nAverage Train Accuracy: {avg_train:.4f}")
     print(f"Average Test Accuracy:  {avg_test:.4f}")
-    print(f"Total Training Time:    {total_time:.1f}s")
+    print(f"Summed Task Train Time: {total_time:.1f}s")
 
 
 def create_run_directory(

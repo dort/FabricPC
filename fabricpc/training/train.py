@@ -14,6 +14,7 @@ import optax
 from fabricpc.core.types import GraphParams, GraphState, GraphStructure
 from fabricpc.core.inference import run_inference
 from fabricpc.graph.graph_net import compute_local_weight_gradients
+from fabricpc.training.train_autoregressive import compute_loss
 
 
 def get_graph_param_gradient(
@@ -257,7 +258,8 @@ def eval_step(
     batch: Dict[str, jnp.ndarray],
     structure: GraphStructure,
     rng_key: jax.Array,
-) -> Tuple[float, int, int]:
+    loss_type: str = "cross_entropy",
+) -> Tuple[float, float, int, int]:
     """
     Single evaluation step (JIT-compilable).
 
@@ -268,7 +270,7 @@ def eval_step(
         rng_key: Random key for initialization
 
     Returns:
-        Tuple of (avg_energy, correct, batch_size)
+        Tuple of (avg_energy, loss, correct, batch_size)
     """
     from fabricpc.graph.state_initializer import initialize_graph_state
 
@@ -304,16 +306,19 @@ def eval_step(
 
     avg_energy = total_energy / batch_size
 
+    loss = jnp.array(0.0)
+
     # Compute accuracy
     correct = 0
     if "y" in structure.task_map:
         y_node = structure.task_map["y"]
         predictions = final_state.nodes[y_node].z_mu
+        loss = compute_loss(final_state, batch["y"], y_node, loss_type)
         pred_labels = jnp.argmax(predictions, axis=1)
         true_labels = jnp.argmax(batch["y"], axis=1)
         correct = jnp.sum(pred_labels == true_labels)
 
-    return avg_energy, correct, batch_size
+    return avg_energy, loss, correct, batch_size
 
 
 def evaluate_pcn(
@@ -338,8 +343,10 @@ def evaluate_pcn(
         Note: energy is not a meaningful metric for evaluation, but we include internal node energy for completeness. Focus on accuracy or other task-specific metrics.
         Note: Energy will be zero in evaluation mode for graphs that are feed-forward in topology (no cycles) and use feed-forward initialization.
     """
+    loss_type = config.get("loss_type", "cross_entropy")
+
     # Create JIT-compiled eval step
-    jit_eval_step = jax.jit(lambda p, b, k: eval_step(p, b, structure, k))
+    jit_eval_step = jax.jit(lambda p, b, k: eval_step(p, b, structure, k, loss_type))
 
     # Estimate number of batches
     try:
@@ -351,6 +358,7 @@ def evaluate_pcn(
     batch_keys = jax.random.split(rng_key, num_batches)
 
     total_energy = 0.0
+    total_loss = 0.0
     total_correct = 0
     total_samples = 0
 
@@ -364,15 +372,24 @@ def evaluate_pcn(
             raise ValueError(f"Unsupported batch format: {type(batch_data)}")
 
         # Run JIT-compiled eval step
-        batch_energy, correct, batch_size = jit_eval_step(
+        batch_energy, batch_loss, correct, batch_size = jit_eval_step(
             params, batch, batch_keys[batch_idx]
         )
 
         total_energy += float(batch_energy) * int(batch_size)
+        total_loss += float(batch_loss) * int(batch_size)
         total_correct += int(correct)
         total_samples += int(batch_size)
 
     avg_energy = total_energy / total_samples if total_samples > 0 else 0.0
+    avg_loss = total_loss / total_samples if total_samples > 0 else 0.0
     accuracy = total_correct / total_samples if total_samples > 0 else 0.0
 
-    return {"energy": avg_energy, "accuracy": accuracy}
+    result = {
+        "energy": avg_energy,
+        "loss": avg_loss,
+        "accuracy": accuracy,
+    }
+    if loss_type == "cross_entropy":
+        result["perplexity"] = float(jnp.exp(avg_loss))
+    return result

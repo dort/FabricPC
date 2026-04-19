@@ -419,8 +419,8 @@ def main():
 
     print_summary_table(trainer.summaries)
 
-    print(f"\nTotal training time: {total_time:.1f}s")
-    print(f"Average time per task: {total_time / len(tasks):.1f}s")
+    print(f"\nWall-clock run time: {total_time:.1f}s")
+    print(f"Average wall time per task: {total_time / len(tasks):.1f}s")
 
     acc_matrix = trainer.accuracy_matrix()
     print("\nAccuracy Matrix:")
